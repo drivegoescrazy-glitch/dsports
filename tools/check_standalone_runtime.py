@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Static regression checks for the Android-embedded Termux-compatible runtime."""
+from pathlib import Path
+import re
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+
+def fail(message: str) -> None:
+    print("FAIL:", message, file=sys.stderr)
+    raise SystemExit(1)
+
+gradle = (ROOT / "app/build.gradle.kts").read_text(encoding="utf-8")
+kotlin = (ROOT / "app/src/main/java/com/dsports/library/EmbeddedToolchain.kt").read_text(encoding="utf-8")
+builder = (ROOT / "app/src/main/assets/dsports_embedded_builder.py").read_text(encoding="utf-8")
+manifest = (ROOT / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
+
+match = re.search(r'applicationId\\s*=\\s*"([^"]+)"', gradle)
+if not match:
+    fail("applicationId not found in app/build.gradle.kts")
+app_id = match.group(1)
+old_root = "/data/data/com.termux"
+new_root = "/data/data/" + app_id
+
+if len(old_root) != len(new_root):
+    fail(f"package root length must remain constant for binary relocation: {old_root!r} -> {new_root!r}")
+if "private const val OLD_APP_ROOT = \"/data/data/com.termux\"" not in kotlin:
+    fail("embedded runtime must define the stock package root as the relocation source")
+if 'private val appRoot = File("/data/data/\u0024{context.packageName}")' not in kotlin:
+    fail("embedded runtime must derive its destination root from the installed package name")
+for required in (
+    "relocateAppRootReferences(prefix.toPath())",
+    "private fun relocateAppRootReferences(root: Path)",
+    'environment()["TERMUX_APP__DATA_DIR"] = appRoot.absolutePath',
+    '"-o Dir::Cache::archives="',
+    'File(aptArchives, "partial").mkdirs()',
+    'runAptCommand("update", log)',
+):
+    if required not in kotlin:
+        fail(f"runtime is missing required path/cache recovery logic: {required}")
+if "\\nLast command output:\\n" in kotlin:
+    fail("diagnostics still encode literal backslash-n instead of actual line breaks")
+
+expected_prefix = new_root + "/files/usr"
+fallback_match = re.search(r'prefix = os\\.environ\\.get\\("PREFIX", "([^"]+)"\\)', builder)
+if not fallback_match:
+    fail("embedded builder does not define a PREFIX fallback")
+if fallback_match.group(1) != expected_prefix:
+    fail(f"builder fallback prefix mismatch: expected {expected_prefix!r}, got {fallback_match.group(1)!r}")
+
+if "com.termux.RUN_COMMAND" in manifest or "com.termux.permission.RUN_COMMAND" in manifest:
+    fail("manifest still declares an external Termux command dependency")
+if (ROOT / "app/src/main/assets/dsports_termux_builder.py").exists():
+    fail("obsolete Termux-dependent builder still exists as an app asset")
+
+print(f"OK: DSports {app_id} has length-safe app-root relocation, a private apt cache,")
+print("    active embedded builder prefix, and no legacy Termux external-command dependency.")
