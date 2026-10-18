@@ -6,16 +6,18 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
 def fail(message: str) -> None:
     print("FAIL:", message, file=sys.stderr)
     raise SystemExit(1)
+
 
 gradle = (ROOT / "app/build.gradle.kts").read_text(encoding="utf-8")
 kotlin = (ROOT / "app/src/main/java/com/dsports/library/EmbeddedToolchain.kt").read_text(encoding="utf-8")
 builder = (ROOT / "app/src/main/assets/dsports_embedded_builder.py").read_text(encoding="utf-8")
 manifest = (ROOT / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
 
-match = re.search(r'applicationId\\s*=\\s*"([^"]+)"', gradle)
+match = re.search(r'applicationId\s*=\s*"([^"]+)"', gradle)
 if not match:
     fail("applicationId not found in app/build.gradle.kts")
 app_id = match.group(1)
@@ -24,9 +26,9 @@ new_root = "/data/data/" + app_id
 
 if len(old_root) != len(new_root):
     fail(f"package root length must remain constant for binary relocation: {old_root!r} -> {new_root!r}")
-if "private const val OLD_APP_ROOT = \"/data/data/com.termux\"" not in kotlin:
+if 'private const val OLD_APP_ROOT = "/data/data/com.termux"' not in kotlin:
     fail("embedded runtime must define the stock package root as the relocation source")
-if 'private val appRoot = File("/data/data/\u0024{context.packageName}")' not in kotlin:
+if 'private val appRoot = File("/data/data/${context.packageName}")' not in kotlin:
     fail("embedded runtime must derive its destination root from the installed package name")
 for required in (
     "relocateAppRootReferences(prefix.toPath())",
@@ -38,11 +40,11 @@ for required in (
 ):
     if required not in kotlin:
         fail(f"runtime is missing required path/cache recovery logic: {required}")
-if "\\nLast command output:\\n" in kotlin:
+if 'recentOutput.joinToString("\\\\n")' in kotlin:
     fail("diagnostics still encode literal backslash-n instead of actual line breaks")
 
 expected_prefix = new_root + "/files/usr"
-fallback_match = re.search(r'prefix = os\\.environ\\.get\\("PREFIX", "([^"]+)"\\)', builder)
+fallback_match = re.search(r'prefix = os\.environ\.get\("PREFIX", "([^"]+)"\)', builder)
 if not fallback_match:
     fail("embedded builder does not define a PREFIX fallback")
 if fallback_match.group(1) != expected_prefix:
