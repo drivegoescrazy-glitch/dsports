@@ -153,16 +153,28 @@ class EmbeddedToolchain(private val context: Context) {
             }
         }
 
+        // Termux bootstrap ZIPs intentionally store symlink definitions in
+        // SYMLINKS.txt instead of storing Unix symlinks in the ZIP itself.
+        // Restore absolute-prefix references before recreating those links.
         relocatePrefixReferences(prefix.toPath())
+        restoreSymlinksFromManifest(log)
+
         directoryModes.sortedByDescending { it.first.absolutePath.length }.forEach { (directory, mode) ->
             if (directory.isDirectory && mode != 0) {
                 try { Os.chmod(directory.absolutePath, mode) } catch (_: Exception) {}
             }
         }
 
-        if (!shell.isFile || !termuxExec.isFile) {
+        if (!shell.isFile) {
             throw IllegalStateException(
-                "The embedded bootstrap unpacked, but its shell launcher is missing. Delete DSports app data and retry."
+                "The embedded bootstrap unpacked, but usr/bin/bash was not found at " +
+                    shell.absolutePath + ". The bootstrap archive layout may have changed."
+            )
+        }
+        if (!termuxExec.isFile) {
+            throw IllegalStateException(
+                "The embedded bootstrap unpacked, but libtermux-exec.so was not found at " +
+                    termuxExec.absolutePath + ". Check the bootstrap symlink manifest."
             )
         }
         bootstrapMarker.writeText("bootstrap-sha256=" + BOOTSTRAP_SHA256 + "\nrelocated-prefix=" + NEW_PREFIX + "\n")
@@ -224,6 +236,65 @@ class EmbeddedToolchain(private val context: Context) {
             }
         }
         return digest.digest().joinToString("") { "%02x".format(Locale.ROOT, it) }
+    }
+
+    /**
+     * Restore the symlinks encoded by Termux's bootstrap generator.
+     *
+     * The official bootstrap creator removes Unix symlinks before zipping the
+     * prefix and records each one as "target←./path" in SYMLINKS.txt. Merely
+     * unzipping the archive therefore leaves tools such as sh, pkg-config and
+     * parts of the dynamic runtime missing even though extraction appears to
+     * have succeeded.
+     */
+    private fun restoreSymlinksFromManifest(log: (String) -> Unit) {
+        val manifest = File(prefix, "SYMLINKS.txt")
+        if (!manifest.isFile) {
+            throw IllegalStateException(
+                "The bootstrap has no SYMLINKS.txt manifest. Cannot safely initialize the embedded runtime."
+            )
+        }
+
+        val normalizedRoot = prefix.toPath().toAbsolutePath().normalize()
+        var restored = 0
+        var seen = 0
+        manifest.forEachLine(Charsets.UTF_8) { line ->
+            val separator = line.lastIndexOf('←')
+            if (separator <= 0 || separator >= line.lastIndex) return@forEachLine
+            seen++
+            val target = line.substring(0, separator).replace(OLD_PREFIX, NEW_PREFIX)
+            val relativeLink = line.substring(separator + 1)
+                .replace('\\', '/')
+                .removePrefix("./")
+                .trimStart('/')
+            if (relativeLink.isBlank()) return@forEachLine
+
+            val destination = File(prefix, relativeLink)
+            val normalizedDestination = destination.toPath().toAbsolutePath().normalize()
+            if (!normalizedDestination.startsWith(normalizedRoot)) {
+                throw IllegalStateException("Unsafe symlink path in bootstrap manifest: " + relativeLink)
+            }
+
+            destination.parentFile?.mkdirs()
+            // The manifest is authoritative: a stored placeholder at this path
+            // must not prevent the symlink from being recreated.
+            java.nio.file.Files.deleteIfExists(normalizedDestination)
+            try {
+                Os.symlink(target, destination.absolutePath)
+                restored++
+            } catch (e: Exception) {
+                throw IllegalStateException(
+                    "Could not restore embedded-runtime symlink " + relativeLink + " -> " + target, e
+                )
+            }
+        }
+
+        if (seen == 0 || restored == 0) {
+            throw IllegalStateException(
+                "The bootstrap symlink manifest contained no usable entries; the runtime is incomplete."
+            )
+        }
+        log("Restored " + restored + " embedded runtime symlinks.")
     }
 
     private fun relocatePrefixReferences(root: Path) {
