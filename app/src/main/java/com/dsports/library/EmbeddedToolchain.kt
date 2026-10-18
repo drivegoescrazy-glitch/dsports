@@ -127,10 +127,10 @@ class EmbeddedToolchain(private val context: Context) {
         }
         val exit = process.waitFor()
         if (exit != 0) {
-            val tail = recentOutput.joinToString("\\n")
+            val tail = recentOutput.joinToString("\n")
             throw IllegalStateException(
                 "Embedded command failed (exit " + exit + "): " + command.take(220) +
-                    if (tail.isBlank()) "" else "\\nLast command output:\\n" + tail
+                    if (tail.isBlank()) "" else "\nLast command output:\n" + tail
             )
         }
     }
@@ -278,7 +278,7 @@ class EmbeddedToolchain(private val context: Context) {
             // A failed apt run may have unpacked packages before a maintainer
             // script failed. Repair paths first, then finish configuration.
             try {
-                runShell("dpkg --configure -a", home, log)
+                runShell("export DEBIAN_FRONTEND=noninteractive; dpkg --configure -a", home, log)
             } catch (configure: Exception) {
                 log("Package configuration pass reported: " + (configure.message ?: configure.javaClass.simpleName))
             }
