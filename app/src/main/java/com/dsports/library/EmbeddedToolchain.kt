@@ -54,21 +54,26 @@ class EmbeddedToolchain(private val context: Context) {
             installBootstrap(log)
         }
 
+        // Repair the execute bits on every launch, including installations created
+        // by earlier builds. The official bootstrap ZIP does not reliably preserve
+        // executable mode bits for all Termux commands and APT transport helpers.
+        repairExecutablePaths(log)
+
         if (!packagesMarker.exists()) {
+            log("Updating embedded package indexes…")
+            runShell("export DEBIAN_FRONTEND=noninteractive; apt update -y", home, log)
             log("Installing compiler, Python, Git, CMake, Ninja and LLVM inside DSports…")
-            val command = """
-                set -e
-                export DEBIAN_FRONTEND=noninteractive
-                apt update -y
-                apt install -y python git cmake ninja clang llvm lld curl tar patch unzip pkg-config make
-                python --version
-                git --version
-                cmake --version
-                ninja --version
-                clang --version
-                llvm-ar --version
-            """.trimIndent()
-            runShell(command, home, log)
+            runShell(
+                "export DEBIAN_FRONTEND=noninteractive; apt install -y python git cmake ninja clang llvm lld curl tar patch unzip pkg-config make",
+                home,
+                log
+            )
+            log("Checking embedded compiler tools…")
+            runShell(
+                "python --version && git --version && cmake --version && ninja --version && clang --version && llvm-ar --version",
+                home,
+                log
+            )
             packagesMarker.writeText("installed\n")
         }
     }
@@ -82,7 +87,7 @@ class EmbeddedToolchain(private val context: Context) {
                 environment()["PREFIX"] = prefix.absolutePath
                 environment()["TERMUX_PREFIX"] = prefix.absolutePath
                 environment()["TERMUX_APP__PACKAGE_NAME"] = "com.dsprtf"
-                environment()["PATH"] = prefix.absolutePath + "/bin"
+                environment()["PATH"] = prefix.absolutePath + "/bin:" + prefix.absolutePath + "/bin/applets:/system/bin:/system/xbin"
                 environment()["LD_LIBRARY_PATH"] = prefix.absolutePath + "/lib"
                 environment()["LD_PRELOAD"] = termuxExec.absolutePath
                 environment()["TMPDIR"] = File(context.cacheDir, "tmp").apply { mkdirs() }.absolutePath
@@ -93,12 +98,21 @@ class EmbeddedToolchain(private val context: Context) {
             }
             .start()
 
+        val recentOutput = mutableListOf<String>()
         BufferedInputStream(process.inputStream).bufferedReader().useLines { lines ->
-            lines.forEach { line -> log(line) }
+            lines.forEach { line ->
+                log(line)
+                recentOutput.add(line)
+                if (recentOutput.size > 30) recentOutput.removeAt(0)
+            }
         }
         val exit = process.waitFor()
         if (exit != 0) {
-            throw IllegalStateException("Embedded command failed (exit " + exit + "): " + command.take(220))
+            val tail = recentOutput.joinToString("\\n")
+            throw IllegalStateException(
+                "Embedded command failed (exit " + exit + "): " + command.take(220) +
+                    if (tail.isBlank()) "" else "\\nLast command output:\\n" + tail
+            )
         }
     }
 
@@ -165,6 +179,8 @@ class EmbeddedToolchain(private val context: Context) {
             }
         }
 
+        repairExecutablePaths(log)
+
         if (!shell.isFile) {
             throw IllegalStateException(
                 "The embedded bootstrap unpacked, but usr/bin/bash was not found at " +
@@ -180,6 +196,40 @@ class EmbeddedToolchain(private val context: Context) {
         bootstrapMarker.writeText("bootstrap-sha256=" + BOOTSTRAP_SHA256 + "\nrelocated-prefix=" + NEW_PREFIX + "\n")
         try { bootstrapZip.delete() } catch (_: Exception) {}
         log("Standalone shell ready. No separate terminal app is needed.")
+    }
+
+    /**
+     * Termux's official bootstrap installer explicitly chmods these locations:
+     * zip archives do not reliably retain executable mode bits across all
+     * extractors. Missing x bits make apt return 126 before package installation.
+     * Reapplying this narrowly-scoped policy is safe and repairs old app data too.
+     */
+    private fun repairExecutablePaths(log: (String) -> Unit) {
+        val executableRoots = listOf(
+            File(prefix, "bin"),
+            File(prefix, "libexec"),
+            File(prefix, "lib/apt/apt-helper"),
+            File(prefix, "lib/apt/methods")
+        )
+        var repaired = 0
+        for (root in executableRoots) {
+            if (!root.exists()) continue
+            val candidates = if (root.isDirectory) root.walkTopDown() else sequenceOf(root)
+            for (file in candidates) {
+                // chmod through links to the target, matching the official Termux
+                // installer behaviour. Never traverse symlink directories.
+                if (!file.isFile) continue
+                try {
+                    Os.chmod(file.absolutePath, 0x1C0) // 0700: owner read/write/execute
+                    repaired++
+                } catch (e: Exception) {
+                    throw IllegalStateException(
+                        "Could not make an embedded runtime tool executable: " + file.absolutePath, e
+                    )
+                }
+            }
+        }
+        log("Verified executable permissions for " + repaired + " embedded runtime files.")
     }
 
     private fun downloadBootstrap(log: (String) -> Unit) {
