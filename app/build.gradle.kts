@@ -9,11 +9,11 @@ android {
     ndkVersion = "27.2.12479018"
 
     defaultConfig {
-        applicationId = "com.dsports.library"
+        applicationId = "com.dsprts"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
 
         externalNativeBuild {
             cmake {
@@ -38,3 +38,5 @@ android {
         }
     }
 }
+
+dependencies { implementation("org.apache.commons:commons-compress:1.27.1") }
