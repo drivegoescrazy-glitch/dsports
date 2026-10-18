@@ -9,11 +9,11 @@ android {
     ndkVersion = "27.2.12479018"
 
     defaultConfig {
-        applicationId = "com.dsprtj"
+        applicationId = "com.dsprtk"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.5.5"
+        versionCode = 11
+        versionName = "0.5.6"
 
         externalNativeBuild {
             cmake {
