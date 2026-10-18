@@ -89,8 +89,6 @@ def patch_android_ndk_toolchain(ndk_dir, log_fn):
     target sysroot/library files, but use the installed ARM64 Termux-compatible
     host binaries for compiler and archive utilities.
     """
-    import re
-
     toolchain_file = Path(ndk_dir) / "build" / "cmake" / "android-legacy.toolchain.cmake"
     if not toolchain_file.is_file():
         raise RuntimeError(
@@ -98,7 +96,7 @@ def patch_android_ndk_toolchain(ndk_dir, log_fn):
             "cannot configure the on-device ARM64 compiler."
         )
 
-    text = toolchain_file.read_text(encoding="utf-8")
+    lines = toolchain_file.read_text(encoding="utf-8").splitlines()
     replacements = {
         "ANDROID_C_COMPILER": "clang",
         "ANDROID_CXX_COMPILER": "clang++",
@@ -108,16 +106,40 @@ def patch_android_ndk_toolchain(ndk_dir, log_fn):
         "ANDROID_STRIP": "llvm-strip",
     }
     for variable, executable in replacements.items():
-        pattern = re.compile(r"(?ms)^[ \\t]*set\\(\\s*" + re.escape(variable) + r"\\b.*?\\)")
-        new_line = 'set(' + variable + ' "$ENV{PREFIX}/bin/' + executable + '")'
-        text, count = pattern.subn(new_line, text, count=1)
-        if count != 1:
+        found_at = None
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped.startswith("set("):
+                continue
+            remainder = stripped[4:].lstrip()
+            if not remainder.startswith(variable):
+                continue
+            if len(remainder) > len(variable) and not (
+                remainder[len(variable)].isspace() or remainder[len(variable)] == ")"
+            ):
+                continue
+            found_at = index
+            break
+
+        if found_at is None:
             raise RuntimeError(
-                "Could not safely patch NDK toolchain variable " + variable +
-                " in " + str(toolchain_file) + "; found " + str(count) + " definitions."
+                "Could not find NDK toolchain variable " + variable +
+                " in " + str(toolchain_file) + "."
             )
 
-    toolchain_file.write_text(text, encoding="utf-8")
+        end_at = found_at
+        while end_at < len(lines) and ")" not in lines[end_at]:
+            end_at += 1
+        if end_at >= len(lines):
+            raise RuntimeError(
+                "Unterminated NDK toolchain assignment for " + variable + "."
+            )
+
+        lines[found_at:end_at + 1] = [
+            'set(' + variable + ' "$ENV{PREFIX}/bin/' + executable + '")'
+        ]
+
+    text = "\n".join(lines) + "\n"
     log_fn("Configured NDK CMake to use native ARM64 compiler/LLVM tools; NDK target sysroot remains unchanged.")
 
 
