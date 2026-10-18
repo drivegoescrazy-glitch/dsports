@@ -81,7 +81,7 @@ class EmbeddedToolchain(private val context: Context) {
                 environment()["HOME"] = home.absolutePath
                 environment()["PREFIX"] = prefix.absolutePath
                 environment()["TERMUX_PREFIX"] = prefix.absolutePath
-                environment()["TERMUX_APP__PACKAGE_NAME"] = "com.dsprts"
+                environment()["TERMUX_APP__PACKAGE_NAME"] = "com.dsprtf"
                 environment()["PATH"] = prefix.absolutePath + "/bin"
                 environment()["LD_LIBRARY_PATH"] = prefix.absolutePath + "/lib"
                 environment()["LD_PRELOAD"] = termuxExec.absolutePath
