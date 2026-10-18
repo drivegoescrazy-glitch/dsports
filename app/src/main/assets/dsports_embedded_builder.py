@@ -80,6 +80,47 @@ def load_setup(repo_dir):
     return module
 
 
+def patch_android_ndk_toolchain(ndk_dir, log_fn):
+    """Make the NDK CMake file use host tools that can execute on Android ARM64.
+
+    The official Linux NDK bundle's bundled host compiler is x86_64. CMake's
+    Android legacy toolchain otherwise selects those x86_64 executables even
+    when the build itself runs on an ARM64 Android device. Keep the NDK's
+    target sysroot/library files, but use the installed ARM64 Termux-compatible
+    host binaries for compiler and archive utilities.
+    """
+    import re
+
+    toolchain_file = Path(ndk_dir) / "build" / "cmake" / "android-legacy.toolchain.cmake"
+    if not toolchain_file.is_file():
+        raise RuntimeError(
+            "The Android NDK is missing build/cmake/android-legacy.toolchain.cmake; "
+            "cannot configure the on-device ARM64 compiler."
+        )
+
+    text = toolchain_file.read_text(encoding="utf-8")
+    replacements = {
+        "ANDROID_C_COMPILER": "clang",
+        "ANDROID_CXX_COMPILER": "clang++",
+        "ANDROID_ASM_COMPILER": "clang",
+        "ANDROID_AR": "llvm-ar",
+        "ANDROID_RANLIB": "llvm-ranlib",
+        "ANDROID_STRIP": "llvm-strip",
+    }
+    for variable, executable in replacements.items():
+        pattern = re.compile(r"(?ms)^[ \\t]*set\\(\\s*" + re.escape(variable) + r"\\b.*?\\)")
+        new_line = 'set(' + variable + ' "$ENV{PREFIX}/bin/' + executable + '")'
+        text, count = pattern.subn(new_line, text, count=1)
+        if count != 1:
+            raise RuntimeError(
+                "Could not safely patch NDK toolchain variable " + variable +
+                " in " + str(toolchain_file) + "; found " + str(count) + " definitions."
+            )
+
+    toolchain_file.write_text(text, encoding="utf-8")
+    log_fn("Configured NDK CMake to use native ARM64 compiler/LLVM tools; NDK target sysroot remains unchanged.")
+
+
 def create_embedded_android_steps(setup):
     """Return the upstream Android build step with the app's embedded Android-native host tools.
 
@@ -99,6 +140,7 @@ def create_embedded_android_steps(setup):
             )
 
         ndk = setup.android_ndk(log_fn, progress_fn)
+        patch_android_ndk_toolchain(ndk, log_fn)
         toolchain = os.path.join(ndk, "build", "cmake", "android.toolchain.cmake").replace("\\", "/")
         api = setup.ANDROID_PLATFORM.split("-")[-1]
         target = "aarch64-linux-android" + api
