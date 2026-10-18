@@ -38,7 +38,7 @@ if 'private val appRoot = File("/data/data/${context.packageName}")' not in kotl
     fail("embedded runtime must derive its destination root from the installed package name")
 for required in (
     "relocateAppRootReferences(prefix.toPath(), log)",
-    "private fun relocateAppRootReferences(root: Path)",
+    "private fun relocateAppRootReferences(root: Path, log: (String) -> Unit)",
     'environment()["TERMUX_APP__DATA_DIR"] = appRoot.absolutePath',
     '"-o Dir::Cache::archives="',
     'File(aptArchives, "partial").mkdirs()',
