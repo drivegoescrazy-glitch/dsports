@@ -6,6 +6,7 @@ import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.file.FileVisitResult
@@ -28,6 +29,7 @@ class EmbeddedToolchain(private val context: Context) {
         private const val BOOTSTRAP_SHA256 =
             "7b170ff5ef0befe501d01febc61382f3c6e34456521853cff9ba0b277aa52fe9"
         private const val OLD_APP_ROOT = "/data/data/com.termux"
+        private const val OLD_PACKAGE_NAME = "com.termux"
         private const val OLD_PREFIX = "$OLD_APP_ROOT/files/usr"
     }
 
@@ -50,7 +52,7 @@ class EmbeddedToolchain(private val context: Context) {
     private val termuxExec = File(prefix, "lib/libtermux-exec.so")
 
     fun ensureReady(log: (String) -> Unit) {
-        if (OLD_APP_ROOT.length != newAppRoot.length || OLD_PREFIX.length != newPrefix.length) {
+        if (OLD_APP_ROOT.length != newAppRoot.length || OLD_PREFIX.length != newPrefix.length || OLD_PACKAGE_NAME.length != context.packageName.length) {
             throw IllegalStateException(
                 "This DSports package ID changes the embedded runtime path length. " +
                     "Use a package ID with the same length as com.termux."
@@ -422,38 +424,104 @@ class EmbeddedToolchain(private val context: Context) {
      * writing inside the separate Termux app's private sandbox.
      */
     private fun relocateAppRootReferences(root: Path) {
-        val oldBytes = OLD_APP_ROOT.toByteArray(Charsets.UTF_8)
-        val newBytes = newAppRoot.toByteArray(Charsets.UTF_8)
+        val replacements = listOf(
+            OLD_APP_ROOT.toByteArray(Charsets.UTF_8) to newAppRoot.toByteArray(Charsets.UTF_8),
+            OLD_PACKAGE_NAME.toByteArray(Charsets.UTF_8) to context.packageName.toByteArray(Charsets.UTF_8)
+        ).sortedByDescending { it.first.size }
+
+        if (replacements.any { it.first.size != it.second.size }) {
+            throw IllegalStateException("Embedded package relocation must preserve all matched string lengths.")
+        }
+
+        var rewrittenFiles = 0
+        var inspectedFiles = 0
         Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
             override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
                 if (!attrs.isRegularFile || attrs.isSymbolicLink) return FileVisitResult.CONTINUE
-                val bytes = try { Files.readAllBytes(file) } catch (_: Exception) {
-                    return FileVisitResult.CONTINUE
-                }
-                var changed = false
-                var i = 0
-                while (i <= bytes.size - oldBytes.size) {
-                    var matches = true
-                    for (j in oldBytes.indices) {
-                        if (bytes[i + j] != oldBytes[j]) {
-                            matches = false
-                            break
-                        }
-                    }
-                    if (matches) {
-                        System.arraycopy(newBytes, 0, bytes, i, newBytes.size)
-                        changed = true
-                        i += oldBytes.size
-                    } else {
-                        i++
-                    }
-                }
-                if (changed) {
-                    try { Files.write(file, bytes) }
-                    catch (e: Exception) { throw IllegalStateException("Could not relocate embedded runtime file: " + file, e) }
+                inspectedFiles++
+                try {
+                    if (rewriteReferencesInFile(file, replacements)) rewrittenFiles++
+                } catch (e: Exception) {
+                    throw IllegalStateException(
+                        "Could not safely inspect or relocate embedded runtime file: " + file, e
+                    )
                 }
                 return FileVisitResult.CONTINUE
             }
         })
+        // This is deliberately logged: the prior version silently skipped unreadable
+        // files and left package scripts pointing into /data/data/com.termux.
+        logRelocationSummary(inspectedFiles, rewrittenFiles)
+    }
+
+    /**
+     * Same-length, block-based replacement avoids loading large compiler libraries
+     * entirely into heap memory. A small overlap catches strings that cross block
+     * boundaries, and writes preserve the binary file size and offsets.
+     */
+    private fun rewriteReferencesInFile(
+        path: Path,
+        replacements: List<Pair<ByteArray, ByteArray>>
+    ): Boolean {
+        var changed = false
+        RandomAccessFile(path.toFile(), "rw").use { file ->
+            val fileSize = file.length()
+            val blockSize = 1024 * 1024
+            val overlap = (replacements.maxOfOrNull { it.first.size } ?: 1) - 1
+            var offset = 0L
+            while (offset < fileSize) {
+                val readSize = minOf(blockSize.toLong(), fileSize - offset).toInt()
+                val buffer = ByteArray(readSize)
+                file.seek(offset)
+                file.readFully(buffer)
+                val hasMore = offset + readSize < fileSize
+                val searchable = if (hasMore) (readSize - overlap).coerceAtLeast(0) else readSize
+                var index = 0
+                var blockChanged = false
+                while (index < searchable) {
+                    var matchedSize = 0
+                    for ((oldBytes, newBytes) in replacements) {
+                        if (index + oldBytes.size > buffer.size) continue
+                        var matches = true
+                        for (j in oldBytes.indices) {
+                            if (buffer[index + j] != oldBytes[j]) {
+                                matches = false
+                                break
+                            }
+                        }
+                        if (matches) {
+                            System.arraycopy(newBytes, 0, buffer, index, newBytes.size)
+                            matchedSize = oldBytes.size
+                            break
+                        }
+                    }
+                    if (matchedSize > 0) {
+                        blockChanged = true
+                        changed = true
+                        index += matchedSize
+                    } else {
+                        index++
+                    }
+                }
+                if (blockChanged) {
+                    file.seek(offset)
+                    file.write(buffer)
+                }
+                if (searchable == 0) {
+                    throw IllegalStateException("Could not advance while scanning embedded runtime file: " + path)
+                }
+                offset += searchable.toLong()
+            }
+        }
+        return changed
+    }
+
+    private fun logRelocationSummary(inspectedFiles: Int, rewrittenFiles: Int) {
+        // Keep the build log informative when the custom app has to relocate
+        // package names embedded by the upstream Termux build.
+        android.util.Log.i(
+            "DSportsRuntime",
+            "Inspected " + inspectedFiles + " embedded files; rewrote " + rewrittenFiles + " path/package references."
+        )
     }
 }
