@@ -41,6 +41,11 @@ class EmbeddedToolchain(private val context: Context) {
     val home = File(appFiles, "home")
     private val newAppRoot = appRoot.absolutePath
     private val newPrefix = prefix.absolutePath
+    private val termuxProjectDir = File(appRoot, "termux")
+    private val termuxCoreDir = File(termuxProjectDir, "core")
+    private val termuxAppsDir = File(termuxProjectDir, "app")
+    private val termuxAppsByUidDir = File(termuxAppsDir, "u")
+    private val termuxLegacyUserConfigDir = File(home, ".termux")
     private val aptArchives = File(context.cacheDir, "apt/archives")
     val work = File(appFiles, "dsports-work")
     private val bootstrapZip = File(appFiles, "bootstrap-aarch64.zip")
@@ -61,6 +66,8 @@ class EmbeddedToolchain(private val context: Context) {
         appFiles.mkdirs()
         home.mkdirs()
         work.mkdirs()
+        termuxCoreDir.mkdirs()
+        termuxAppsByUidDir.mkdirs()
         aptArchives.mkdirs()
         File(aptArchives, "partial").mkdirs()
 
@@ -114,9 +121,21 @@ class EmbeddedToolchain(private val context: Context) {
                 environment()["PREFIX"] = prefix.absolutePath
                 environment()["TERMUX_PREFIX"] = prefix.absolutePath
                 environment()["TERMUX_APP__PACKAGE_NAME"] = context.packageName
+                environment()["TERMUX_APP_PACKAGE"] = context.packageName
                 environment()["TERMUX_APP__DATA_DIR"] = appRoot.absolutePath
+                environment()["TERMUX__PROJECT_SUBDIR"] = "termux"
+                environment()["TERMUX__PROJECT_DIR"] = termuxProjectDir.absolutePath
+                environment()["TERMUX__CORE_DIR"] = termuxCoreDir.absolutePath
+                environment()["TERMUX__APPS_DIR"] = termuxAppsDir.absolutePath
+                environment()["TERMUX__APPS_DIR_BY_UID"] = termuxAppsByUidDir.absolutePath
+                environment()["TERMUX__ROOTFS_SUBDIR"] = "files"
                 environment()["TERMUX__ROOTFS"] = appFiles.absolutePath
+                environment()["TERMUX_BASE_DIR"] = appFiles.absolutePath
+                environment()["TERMUX__HOME_SUBDIR"] = "home"
                 environment()["TERMUX__HOME"] = home.absolutePath
+                environment()["TERMUX_ANDROID_HOME"] = home.absolutePath
+                environment()["TERMUX__LEGACY_PROJECT_USER_CONFIG_DIR"] = termuxLegacyUserConfigDir.absolutePath
+                environment()["TERMUX__PREFIX_SUBDIR"] = "usr"
                 environment()["TERMUX__PREFIX"] = prefix.absolutePath
                 environment()["PATH"] = prefix.absolutePath + "/bin:" + prefix.absolutePath + "/bin/applets:/system/bin:/system/xbin"
                 environment()["LD_LIBRARY_PATH"] = prefix.absolutePath + "/lib"
