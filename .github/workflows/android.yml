@@ -22,8 +22,7 @@ jobs:
         with:
           gradle-version: '8.10.2'
       # GitHub-hosted Ubuntu runners already include the Android SDK.
-      # Avoid android-actions/setup-android: its current setup script tries
-      # to install the removed legacy SDK package "tools" and fails.
+      # Install the NDK/CMake packages explicitly for the JNI native library.
       - name: Locate Android SDK
         run: |
           echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
@@ -31,7 +30,7 @@ jobs:
           echo "${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
       - name: Install Android SDK components
         run: |
-          sdkmanager --sdk_root="${ANDROID_HOME}" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          sdkmanager --sdk_root="${ANDROID_HOME}" "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
       - name: Build debug APK
         run: |
           gradle --version
