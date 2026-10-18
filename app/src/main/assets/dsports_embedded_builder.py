@@ -88,7 +88,7 @@ def create_embedded_android_steps(setup):
     are deliberately not invoked on Android.
     """
     def android_steps(rom, jobs, log_fn, progress_fn, run):
-        prefix = os.environ.get("PREFIX", "/data/data/com.dsprtf/files/usr")
+        prefix = os.environ.get("PREFIX", "/data/data/com.dsprtg/files/usr")
         bindir = os.path.join(prefix, "bin")
         required = ["clang", "clang++", "llvm-ar", "llvm-ranlib", "ld.lld", "llvm-strip"]
         missing = [name for name in required if not os.path.exists(os.path.join(bindir, name))]
