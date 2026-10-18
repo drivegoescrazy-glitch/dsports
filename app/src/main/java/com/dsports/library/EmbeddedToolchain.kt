@@ -27,13 +27,19 @@ class EmbeddedToolchain(private val context: Context) {
             "https://github.com/termux/termux-packages/releases/download/bootstrap-2026.10.18-r1%2Bapt.android-7/bootstrap-aarch64.zip"
         private const val BOOTSTRAP_SHA256 =
             "7b170ff5ef0befe501d01febc61382f3c6e34456521853cff9ba0b277aa52fe9"
-        private const val OLD_PREFIX = "/data/data/com.termux/files/usr"
-        private const val NEW_PREFIX = "/data/data/com.dsprtg/files/usr"
+        private const val OLD_APP_ROOT = "/data/data/com.termux"
+        private const val OLD_PREFIX = "$OLD_APP_ROOT/files/usr"
     }
 
-    private val appFiles = File("/data/data/com.dsprtg/files")
+    // The stock Termux root and DSports root must have equal length because
+    // relocation replaces path strings inside already-compiled binaries.
+    private val appRoot = File("/data/data/${context.packageName}")
+    private val appFiles = File(appRoot, "files")
     val prefix = File(appFiles, "usr")
     val home = File(appFiles, "home")
+    private val newAppRoot = appRoot.absolutePath
+    private val newPrefix = prefix.absolutePath
+    private val aptArchives = File(context.cacheDir, "apt/archives")
     val work = File(appFiles, "dsports-work")
     private val bootstrapZip = File(appFiles, "bootstrap-aarch64.zip")
     private val bootstrapMarker = File(appFiles, ".dsports-bootstrap-ready")
@@ -43,12 +49,17 @@ class EmbeddedToolchain(private val context: Context) {
     private val termuxExec = File(prefix, "lib/libtermux-exec.so")
 
     fun ensureReady(log: (String) -> Unit) {
-        if (OLD_PREFIX.length != NEW_PREFIX.length) {
-            throw IllegalStateException("Embedded runtime prefix relocation must preserve binary string lengths.")
+        if (OLD_APP_ROOT.length != newAppRoot.length || OLD_PREFIX.length != newPrefix.length) {
+            throw IllegalStateException(
+                "This DSports package ID changes the embedded runtime path length. " +
+                    "Use a package ID with the same length as com.termux."
+            )
         }
         appFiles.mkdirs()
         home.mkdirs()
         work.mkdirs()
+        aptArchives.mkdirs()
+        File(aptArchives, "partial").mkdirs()
 
         if (!bootstrapMarker.exists() || !shell.isFile || !termuxExec.exists()) {
             installBootstrap(log)
@@ -60,14 +71,18 @@ class EmbeddedToolchain(private val context: Context) {
         repairExecutablePaths(log)
 
         if (!packagesMarker.exists()) {
-            log("Updating embedded package indexes…")
-            runShell("export DEBIAN_FRONTEND=noninteractive; apt update -y", home, log)
+            log("Updating embedded package indexes with DSports-private cache paths…")
+            runAptCommand("update", log)
             log("Installing compiler, Python, Git, CMake, Ninja and LLVM inside DSports…")
-            runShell(
-                "export DEBIAN_FRONTEND=noninteractive; apt install -y python git cmake ninja clang llvm lld curl tar patch unzip pkg-config make",
-                home,
+            runAptCommand(
+                "install -y python git cmake ninja clang llvm lld curl tar patch unzip pkg-config make",
                 log
             )
+            // Upstream .deb packages can contain additional stock-Termux path
+            // strings in binaries and maintainer scripts. Relocate them before
+            // checking tools or marking the environment ready.
+            relocateAppRootReferences(prefix.toPath())
+            repairExecutablePaths(log)
             log("Checking embedded compiler tools…")
             runShell(
                 "python --version && git --version && cmake --version && ninja --version && clang --version && llvm-ar --version",
@@ -86,7 +101,11 @@ class EmbeddedToolchain(private val context: Context) {
                 environment()["HOME"] = home.absolutePath
                 environment()["PREFIX"] = prefix.absolutePath
                 environment()["TERMUX_PREFIX"] = prefix.absolutePath
-                environment()["TERMUX_APP__PACKAGE_NAME"] = "com.dsprtg"
+                environment()["TERMUX_APP__PACKAGE_NAME"] = context.packageName
+                environment()["TERMUX_APP__DATA_DIR"] = appRoot.absolutePath
+                environment()["TERMUX__ROOTFS"] = appFiles.absolutePath
+                environment()["TERMUX__HOME"] = home.absolutePath
+                environment()["TERMUX__PREFIX"] = prefix.absolutePath
                 environment()["PATH"] = prefix.absolutePath + "/bin:" + prefix.absolutePath + "/bin/applets:/system/bin:/system/xbin"
                 environment()["LD_LIBRARY_PATH"] = prefix.absolutePath + "/lib"
                 environment()["LD_PRELOAD"] = termuxExec.absolutePath
@@ -145,7 +164,7 @@ class EmbeddedToolchain(private val context: Context) {
                 when {
                     (mode and 0xF000) == 0xA000 -> {
                         destination.parentFile?.mkdirs()
-                        val target = zip.readBytes().toString(Charsets.UTF_8).replace(OLD_PREFIX, NEW_PREFIX)
+                        val target = zip.readBytes().toString(Charsets.UTF_8).replace(OLD_APP_ROOT, newAppRoot)
                         try {
                             Os.symlink(target, destination.absolutePath)
                         } catch (e: Exception) {
@@ -170,7 +189,7 @@ class EmbeddedToolchain(private val context: Context) {
         // Termux bootstrap ZIPs intentionally store symlink definitions in
         // SYMLINKS.txt instead of storing Unix symlinks in the ZIP itself.
         // Restore absolute-prefix references before recreating those links.
-        relocatePrefixReferences(prefix.toPath())
+        relocateAppRootReferences(prefix.toPath())
         restoreSymlinksFromManifest(log)
 
         directoryModes.sortedByDescending { it.first.absolutePath.length }.forEach { (directory, mode) ->
@@ -193,7 +212,7 @@ class EmbeddedToolchain(private val context: Context) {
                     termuxExec.absolutePath + ". Check the bootstrap symlink manifest."
             )
         }
-        bootstrapMarker.writeText("bootstrap-sha256=" + BOOTSTRAP_SHA256 + "\nrelocated-prefix=" + NEW_PREFIX + "\n")
+        bootstrapMarker.writeText("bootstrap-sha256=" + BOOTSTRAP_SHA256 + "\nrelocated-root=" + newAppRoot + "\nrelocated-prefix=" + newPrefix + "\n")
         try { bootstrapZip.delete() } catch (_: Exception) {}
         log("Standalone shell ready. No separate terminal app is needed.")
     }
@@ -231,6 +250,44 @@ class EmbeddedToolchain(private val context: Context) {
         }
         log("Verified executable permissions for " + repaired + " embedded runtime files.")
     }
+
+    private fun runAptCommand(arguments: String, log: (String) -> Unit) {
+        // Stock Termux apt normally stores downloaded archives under
+        // /data/data/com.termux/cache. Pin its archive cache to DSports' own
+        // private Android cache directory, including apt's required partial dir.
+        aptArchives.mkdirs()
+        File(aptArchives, "partial").mkdirs()
+        val cacheOption = "-o Dir::Cache::archives=" + shellQuote(aptArchives.absolutePath)
+        val command = "export DEBIAN_FRONTEND=noninteractive; apt-get " + cacheOption + " " + arguments
+        try {
+            runShell(command, home, log)
+        } catch (first: Exception) {
+            val details = first.message ?: ""
+            if (!details.contains(OLD_APP_ROOT) &&
+                !details.contains("Archives directory") &&
+                !details.contains("com.termux/files/home/.termux")) {
+                throw first
+            }
+
+            log("Detected a stock-Termux path in a package script. Repairing installed files and retrying configuration…")
+            relocateAppRootReferences(prefix.toPath())
+            repairExecutablePaths(log)
+            aptArchives.mkdirs()
+            File(aptArchives, "partial").mkdirs()
+
+            // A failed apt run may have unpacked packages before a maintainer
+            // script failed. Repair paths first, then finish configuration.
+            try {
+                runShell("dpkg --configure -a", home, log)
+            } catch (configure: Exception) {
+                log("Package configuration pass reported: " + (configure.message ?: configure.javaClass.simpleName))
+            }
+            runShell(command, home, log)
+        }
+    }
+
+    private fun shellQuote(value: String): String =
+        "'" + value.replace("'", "'\\''") + "'"
 
     private fun downloadBootstrap(log: (String) -> Unit) {
         if (bootstrapZip.exists() && sha256(bootstrapZip) == BOOTSTRAP_SHA256) return
@@ -312,7 +369,7 @@ class EmbeddedToolchain(private val context: Context) {
             val separator = line.lastIndexOf('←')
             if (separator <= 0 || separator >= line.lastIndex) return@forEachLine
             seen++
-            val target = line.substring(0, separator).replace(OLD_PREFIX, NEW_PREFIX)
+            val target = line.substring(0, separator).replace(OLD_APP_ROOT, newAppRoot)
             val relativeLink = line.substring(separator + 1)
                 .replace('\\', '/')
                 .removePrefix("./")
@@ -347,9 +404,15 @@ class EmbeddedToolchain(private val context: Context) {
         log("Restored " + restored + " embedded runtime symlinks.")
     }
 
-    private fun relocatePrefixReferences(root: Path) {
-        val oldBytes = OLD_PREFIX.toByteArray(Charsets.UTF_8)
-        val newBytes = NEW_PREFIX.toByteArray(Charsets.UTF_8)
+    /**
+     * Rewrite the application data root, not just files/usr. Termux packages
+     * bake /data/data/com.termux into apt's archive cache, HOME paths and
+     * package maintainer scripts. Leaving those strings intact makes apt try
+     * writing inside the separate Termux app's private sandbox.
+     */
+    private fun relocateAppRootReferences(root: Path) {
+        val oldBytes = OLD_APP_ROOT.toByteArray(Charsets.UTF_8)
+        val newBytes = newAppRoot.toByteArray(Charsets.UTF_8)
         Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
             override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
                 if (!attrs.isRegularFile || attrs.isSymbolicLink) return FileVisitResult.CONTINUE
