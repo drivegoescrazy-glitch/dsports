@@ -50,6 +50,20 @@ if not fallback_match:
 if fallback_match.group(1) != expected_prefix:
     fail(f"builder fallback prefix mismatch: expected {expected_prefix!r}, got {fallback_match.group(1)!r}")
 
+for required in (
+    "def patch_android_ndk_toolchain(ndk_dir, log_fn)",
+    "patch_android_ndk_toolchain(ndk, log_fn)",
+    '"ANDROID_C_COMPILER": "clang"',
+    '"ANDROID_CXX_COMPILER": "clang++"',
+    '"ANDROID_ASM_COMPILER": "clang"',
+    '"ANDROID_AR": "llvm-ar"',
+    '"ANDROID_RANLIB": "llvm-ranlib"',
+    '"ANDROID_STRIP": "llvm-strip"',
+    'toolchain_file.write_text(text, encoding="utf-8")',
+):
+    if required not in builder:
+        fail(f"embedded builder is missing its native-ARM64 NDK toolchain patch: {required}")
+
 if "com.termux.RUN_COMMAND" in manifest or "com.termux.permission.RUN_COMMAND" in manifest:
     fail("manifest still declares an external Termux command dependency")
 if (ROOT / "app/src/main/assets/dsports_termux_builder.py").exists():
