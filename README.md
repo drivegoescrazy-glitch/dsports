@@ -1,31 +1,37 @@
 # DSports Android
 
-DSports is an Android game-library and native-port research project. The app can scan a folder selected by the user for Nintendo DS .nds files and run a local, read-only header/hash inspection on a likely Pokémon SoulSilver file.
+DSports now has an **experimental on-device SoulSilver APK builder**. It selects a user's local Nintendo DS ROM, invokes the SSRecomp native recompiler through Termux, builds the Android runtime locally, and packages a separate playable APK. This is intended for ARM64 Android handhelds such as the AYN Thor.
 
-## Privacy guarantee for user game files
+## Build a port inside DSports
 
-- The app reads a ROM only after the user explicitly selects its folder.
-- The current inspection streams bytes locally to read the DS header and calculate a SHA-1 checksum.
-- It does not upload, copy into the repository, or modify the ROM.
-- No ROM, extracted game assets, save data, or user-provided game archive should ever be committed to this repository or attached to a release.
+1. Install and open Termux on the handheld.
+2. In Termux, run `termux-setup-storage`.
+3. Enable external command requests in Termux:
+   ```sh
+   mkdir -p ~/.termux
+   printf '\nallow-external-apps = true\n' >> ~/.termux/termux.properties
+   ```
+   Close and reopen Termux after changing the setting.
+4. In Android Settings, allow DSports **Run commands in Termux environment** permission, and grant Termux storage access.
+5. Open DSports, select your own **US Pokémon SoulSilver .nds** dump, press **Build playable Android APK**, and leave the Termux build session running. Then tap **Install ported game** when DSports reports success.
 
-The SoulSilver archive shared in the development chat is reference material only. It is not part of the repository or build inputs.
+The first build installs local compiler packages, downloads the Android NDK and SDL2 source, recompiles game code from the selected ROM, and compiles the native runtime. The process is compute- and storage-intensive and may take a long time. The builder conservatively uses two parallel jobs.
 
-## Native-port status
+## ROM privacy
 
-**Native-port status: bootstrap only; SoulSilver gameplay is not implemented.** DSports now packages a small C++ Android NDK library and calls it through JNI, which establishes the native build/bridge foundation. The app still only performs local ROM diagnostics; it does not convert a ROM or run the game. A real native port, like the Minish Cap project, needs reconstructed game logic plus replacement platform services for Nintendo DS-specific systems (ARM9/ARM7, graphics, touch, audio, saves, filesystem and timing). A simple ROM-to-APK packaging step would still be emulation, not a native port.
+- The ROM is read and processed locally on the handheld. DSports does not upload it to GitHub or a build server.
+- DSports temporarily stages a copy under `Download/DSports/soulsilver.nds` so Termux can read it. After a successful build, DSports deletes that staged copy.
+- The generated `Download/DSports/SoulSilver-ssrecomp.apk` contains the game copy needed to play. Keep that APK private and do not upload or redistribute it.
+- Generated C++ and compiler/build files remain in Termux's private application storage. No ROM, generated game code, save file, or game-containing APK is committed to this repository or CI artifacts.
 
-The Minish Cap example works because it builds a native C/C++ port from an existing decompilation and its own platform/renderer/audio layers; it does not magically translate a ROM into native Android source. The public pret/pokeheartgold project is a work-in-progress disassembly, not a ready-made Android native runtime. The project now includes a local Windows build helper that uses the existing SSRecomp native recompilation project to create a game-containing Android APK from the user's own ROM. From PowerShell on a PC, run `.\tools\build_soulsilver_android.ps1 -RomPath "D:\\Games\\SoulSilver.nds"`. The first build may take 20–40 minutes. The resulting APK includes game data and must remain private; the script keeps its source/build files outside this repository. This is an experimental external build route, not an on-device converter. See `docs/native-runtime-status.md` for requirements and limits.
+## Implementation and limitations
 
-## Current features
+The app uses the open-source [SSRecomp project](https://github.com/ClickingMaster/ssrecomp) at release tag `v0.3.0`. The bundled `dsports_termux_builder.py` adapts its Android build steps to use Termux's on-device ARM64 compiler with Android NDK headers/libraries. SSRecomp recompiles game code to C++ and combines it with a modified melonDS runtime. That is an actual native-recompilation-based game build, not just copying a ROM into a generic emulator wrapper.
 
-- Read-only folder scanning through Android's Storage Access Framework.
-- Filename-based candidate detection for SoulSilver.
-- On-device DS header, title, game-code and SHA-1 diagnostics.
-- No network code for ROM handling.
-- C++ native library compiled into the APK through the Android NDK/CMake and a Kotlin JNI bridge.
-- GitHub Actions debug APK build and release-on-tag workflow.
+This on-device toolchain is experimental. Successful compilation depends on the Termux version, available storage/RAM, and whether the Android NDK toolchain works with Termux's compiler. The GitHub Actions workflow only verifies the DSports Android app itself builds; it does not have access to the user's ROM and does not run the on-device game build.
 
-## Build and release
+## Development
 
-Build locally with Android Studio or gradle assembleDebug in an environment with the Android SDK configured. GitHub Actions builds an APK on pushes to main. Pushing a version tag such as v0.1.0 builds and attaches the APK to a GitHub Release. This is currently a debug-signed prototype, not a production-ready native port.
+The app is written in Kotlin with a small JNI/C++ bootstrap. The local port pipeline lives in `app/src/main/assets/dsports_termux_builder.py`; app UI and Termux orchestration live in `app/src/main/java/com/dsports/library/MainActivity.kt`.
+
+GitHub Actions builds a debug APK on pushes to `main`. A version tag such as `v0.3.0` publishes an APK release. The DSports debug APK is a local porting tool; it is not itself a playable SoulSilver port. The separate SoulSilver APK is generated only on the user's device from the user's own ROM.
