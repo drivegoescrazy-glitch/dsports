@@ -43,6 +43,7 @@ class EmbeddedToolchain(private val context: Context) {
     val work = File(appFiles, "dsports-work")
     private val bootstrapZip = File(appFiles, "bootstrap-aarch64.zip")
     private val bootstrapMarker = File(appFiles, ".dsports-bootstrap-ready")
+    private val rootRelocationMarker = File(appFiles, ".dsports-root-relocated-v2")
     private val packagesMarker = File(appFiles, ".dsports-compiler-packages-ready")
     private val linker = "/system/bin/linker64"
     private val shell = File(prefix, "bin/bash")
@@ -63,6 +64,15 @@ class EmbeddedToolchain(private val context: Context) {
 
         if (!bootstrapMarker.exists() || !shell.isFile || !termuxExec.exists()) {
             installBootstrap(log)
+        }
+
+        // Older test APKs only relocated files/usr. Repair an existing runtime
+        // once so apt cache defaults and HOME/config paths no longer target
+        // /data/data/com.termux after the app is updated.
+        if (!rootRelocationMarker.isFile) {
+            log("Checking existing runtime for leftover stock-Termux paths…")
+            relocateAppRootReferences(prefix.toPath())
+            rootRelocationMarker.writeText("relocated-root=" + newAppRoot + "\n")
         }
 
         // Repair the execute bits on every launch, including installations created
@@ -213,6 +223,7 @@ class EmbeddedToolchain(private val context: Context) {
             )
         }
         bootstrapMarker.writeText("bootstrap-sha256=" + BOOTSTRAP_SHA256 + "\nrelocated-root=" + newAppRoot + "\nrelocated-prefix=" + newPrefix + "\n")
+        rootRelocationMarker.writeText("relocated-root=" + newAppRoot + "\n")
         try { bootstrapZip.delete() } catch (_: Exception) {}
         log("Standalone shell ready. No separate terminal app is needed.")
     }
