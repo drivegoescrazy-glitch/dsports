@@ -13,9 +13,9 @@ The SoulSilver archive shared in the development chat is reference material only
 
 ## Native-port status
 
-**The native SoulSilver converter is not implemented yet.** The current app performs diagnostics only; it does not convert a ROM or run the game. A real native port, like the Minish Cap project, needs a reconstructed/decompiled game codebase plus a replacement platform layer for Nintendo DS-specific systems (ARM9/ARM7, graphics, touch, audio, saves, filesystem and timing). A simple ROM-to-APK packaging step would still be emulation, not a native port.
+**Native-port status: bootstrap only; SoulSilver gameplay is not implemented.** DSports now packages a small C++ Android NDK library and calls it through JNI, which establishes the native build/bridge foundation. The app still only performs local ROM diagnostics; it does not convert a ROM or run the game. A real native port, like the Minish Cap project, needs reconstructed game logic plus replacement platform services for Nintendo DS-specific systems (ARM9/ARM7, graphics, touch, audio, saves, filesystem and timing). A simple ROM-to-APK packaging step would still be emulation, not a native port.
 
-The Minish Cap example works because it builds a native C/C++ port from an existing decompilation and its own platform/renderer/audio layers; it does not magically translate a ROM into native Android source. The public pret/pokeheartgold project is a work-in-progress disassembly, not a ready-made Android native runtime. The next engineering milestone is a separate, legally reviewed native-runtime proof of concept and source/toolchain feasibility study—not falsely labelling the current scanner as a converter.
+The Minish Cap example works because it builds a native C/C++ port from an existing decompilation and its own platform/renderer/audio layers; it does not magically translate a ROM into native Android source. The public pret/pokeheartgold project is a work-in-progress disassembly, not a ready-made Android native runtime. The next milestone is a source/toolchain feasibility study and a minimal DS graphics/input proof of concept. See `docs/native-runtime-status.md` for the current scaffold and milestones.
 
 ## Current features
 
@@ -23,6 +23,7 @@ The Minish Cap example works because it builds a native C/C++ port from an exist
 - Filename-based candidate detection for SoulSilver.
 - On-device DS header, title, game-code and SHA-1 diagnostics.
 - No network code for ROM handling.
+- C++ native library compiled into the APK through the Android NDK/CMake and a Kotlin JNI bridge.
 - GitHub Actions debug APK build and release-on-tag workflow.
 
 ## Build and release
