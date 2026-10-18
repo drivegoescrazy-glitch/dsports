@@ -145,8 +145,8 @@ class MainActivity : Activity() {
                 val title = ascii(header, 0, 12)
                 val gameCode = ascii(header, 12, 4)
                 val maker = ascii(header, 16, 2)
-                val sha1 = digest.digest().joinToString("") { "%02x".format(it) }
-                val looksLikeSoulSilver = gameCode == "IPG" || displayName.lowercase(Locale.ROOT).contains("soulsilver")
+                val sha1 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
+                val looksLikeSoulSilver = gameCode.startsWith("IPG") || displayName.lowercase(Locale.ROOT).contains("soulsilver")
                 "Local inspection complete\n\nFile: " + displayName +
                     "\nSize: " + String.format(Locale.US, "%,d bytes", totalBytes) +
                     "\nHeader title: " + (title.ifBlank { "(blank)" }) +
