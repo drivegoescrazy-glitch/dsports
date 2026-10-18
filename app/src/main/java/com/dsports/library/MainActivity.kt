@@ -37,8 +37,14 @@ class MainActivity : Activity() {
         status = TextView(this).apply { text = "Choose your DS folder. Files are read-only."; textSize = 14f; setTextColor(0xFFB8C7D9.toInt()); setPadding(0, 12, 0, 12) }
         left.addView(status)
         left.addView(Button(this).apply { text = "Select DS folder"; setOnClickListener { chooseFolder() } })
+        val nativeStatus = try {
+            NativePortBridge.nativeStatus()
+        } catch (e: Throwable) {
+            "Native core failed to load: " + (e.message ?: "unknown error")
+        }
         left.addView(TextView(this).apply {
-            text = "NATIVE PORT LAB\n\nSoulSilver must be rebuilt from game logic and a DS-to-Android platform layer. A ROM scan alone cannot convert it."
+            text = "NATIVE CORE\n\n" + nativeStatus +
+                "\n\nNext: integrate reconstructed SoulSilver game logic and DS hardware services. This bootstrap is not a playable port."
             textSize = 13f
             setTextColor(0xFFB8C7D9.toInt())
             setPadding(0, 20, 0, 0)
@@ -155,7 +161,8 @@ class MainActivity : Activity() {
                     "\nSHA-1: " + sha1 +
                     "\nCandidate: " + (if (looksLikeSoulSilver) "Pokémon SoulSilver / verify against a trusted local reference" else "Not confirmed as SoulSilver") +
                     "\n\nPrivacy: read-only inspection on this device. The ROM bytes are not sent to a server or included in this project." +
-                    "\n\nNative port status: no SoulSilver native runtime or converter is implemented yet. This report is diagnostics only."
+                    "\n\nNative core: " + try { NativePortBridge.nativeStatus() } catch (e: Throwable) { "unavailable" } +
+                    "\n\nSoulSilver native gameplay is not implemented. This report is diagnostics only."
             } catch (e: Exception) {
                 "Inspection failed: " + (e.message ?: "unknown error") + "\n\nThe file was not uploaded or modified."
             }
