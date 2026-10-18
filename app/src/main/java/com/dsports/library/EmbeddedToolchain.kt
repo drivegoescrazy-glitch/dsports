@@ -28,10 +28,10 @@ class EmbeddedToolchain(private val context: Context) {
         private const val BOOTSTRAP_SHA256 =
             "7b170ff5ef0befe501d01febc61382f3c6e34456521853cff9ba0b277aa52fe9"
         private const val OLD_PREFIX = "/data/data/com.termux/files/usr"
-        private const val NEW_PREFIX = "/data/data/com.dsprts/files/usr"
+        private const val NEW_PREFIX = "/data/data/com.dsprtf/files/usr"
     }
 
-    private val appFiles = File("/data/data/com.dsprts/files")
+    private val appFiles = File("/data/data/com.dsprtf/files")
     val prefix = File(appFiles, "usr")
     val home = File(appFiles, "home")
     val work = File(appFiles, "dsports-work")
