@@ -37,6 +37,10 @@ class MainActivity : Activity() {
         status = TextView(this).apply { text = "Choose your DS folder. Files are read-only."; textSize = 14f; setTextColor(0xFFB8C7D9.toInt()); setPadding(0, 12, 0, 12) }
         left.addView(status)
         left.addView(Button(this).apply { text = "Select DS folder"; setOnClickListener { chooseFolder() } })
+        left.addView(Button(this).apply {
+            text = "Native APK build guide (PC)"
+            setOnClickListener { showNativeBuildGuide() }
+        })
         val nativeStatus = try {
             NativePortBridge.nativeStatus()
         } catch (e: Throwable) {
@@ -61,6 +65,28 @@ class MainActivity : Activity() {
         root.addView(right, LinearLayout.LayoutParams(0, -1, 0.62f))
         setContentView(root)
         addMessage("No folder selected", "Select the folder containing your .nds files.")
+    }
+
+
+    private fun showNativeBuildGuide() {
+        AlertDialog.Builder(this)
+            .setTitle("Native SoulSilver Android build")
+            .setMessage(
+                "A native SoulSilver recompilation project already exists: SSRecomp. " +
+                "Its experimental Android APK is built on a PC from your own .nds file, " +
+                "then transferred to your Android device. The first build can take 20–40 minutes. " +
+                "The resulting APK contains the game, so keep it private.\n\n" +
+                "DSports does not yet perform that build inside Android; this button opens the upstream project and its instructions."
+            )
+            .setPositiveButton("Open SSRecomp") { _, _ ->
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/ClickingMaster/ssrecomp/releases/latest")))
+                } catch (_: Exception) {
+                    status.text = "Open github.com/ClickingMaster/ssrecomp in your browser."
+                }
+            }
+            .setNegativeButton("Close", null)
+            .show()
     }
 
     private fun chooseFolder() {
