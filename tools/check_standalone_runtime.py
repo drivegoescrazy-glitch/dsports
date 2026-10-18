@@ -28,6 +28,12 @@ if len(old_root) != len(new_root):
     fail(f"package root length must remain constant for binary relocation: {old_root!r} -> {new_root!r}")
 if 'private const val OLD_APP_ROOT = "/data/data/com.termux"' not in kotlin:
     fail("embedded runtime must define the stock package root as the relocation source")
+if 'private const val OLD_PACKAGE_NAME = "com.termux"' not in kotlin:
+    fail("embedded runtime must define the stock package-name relocation source")
+if "OLD_PACKAGE_NAME.toByteArray(Charsets.UTF_8) to context.packageName.toByteArray(Charsets.UTF_8)" not in kotlin:
+    fail("embedded runtime must relocate bare package-name strings inside binaries")
+if "RandomAccessFile(path.toFile(), \"rw\")" not in kotlin:
+    fail("runtime path rewriting must scan in blocks to avoid loading large compiler binaries into memory")
 if 'private val appRoot = File("/data/data/${context.packageName}")' not in kotlin:
     fail("embedded runtime must derive its destination root from the installed package name")
 for required in (
