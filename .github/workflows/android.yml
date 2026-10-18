@@ -15,7 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate standalone local port-builder script
-        run: python3 -m py_compile app/src/main/assets/dsports_embedded_builder.py
+        run: |
+          python3 -m py_compile app/src/main/assets/dsports_embedded_builder.py
+          python3 tools/check_standalone_runtime.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
