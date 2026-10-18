@@ -22,7 +22,7 @@ On the first build, DSports downloads a SHA-256-pinned ARM64 bootstrap environme
 
 This is an experimental standalone build environment, not a guarantee that a working SoulSilver port will compile on every device. The workflow can validate that the DSports Android app compiles, but the full on-device native recompile has not yet been verified end-to-end on an AYN Thor. The build may still encounter Android toolchain, package-relocation, or upstream SSRecomp compatibility errors; check the in-app log if this happens.
 
-The embedded runtime uses a renamed package prefix so the app can run Termux-built Android-native utilities without needing the Termux app. On Android, the package ID is `com.dsprtg`; the visible app name remains DSports. This hotfix uses package ID `com.dsprtg` so it can be installed alongside the earlier `com.dsprts` build without relying on the previous debug-signing key. After verifying the hotfix, you can remove the old copy.
+The embedded runtime uses a renamed package prefix so the app can run Termux-built Android-native utilities without needing the Termux app. On Android, the package ID is `com.dsprth`; the visible app name remains DSports. This hotfix uses package ID `com.dsprth` so it can be installed alongside the earlier `com.dsprts` build without relying on the previous debug-signing key. After verifying the hotfix, you can remove the old copy.
 
 ## Development
 
