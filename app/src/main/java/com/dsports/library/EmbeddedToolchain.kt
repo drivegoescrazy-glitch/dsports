@@ -73,7 +73,7 @@ class EmbeddedToolchain(private val context: Context) {
         // /data/data/com.termux after the app is updated.
         if (!rootRelocationMarker.isFile) {
             log("Checking existing runtime for leftover stock-Termux paths…")
-            relocateAppRootReferences(prefix.toPath())
+            relocateAppRootReferences(prefix.toPath(), log)
             rootRelocationMarker.writeText("relocated-root=" + newAppRoot + "\n")
         }
 
@@ -93,7 +93,7 @@ class EmbeddedToolchain(private val context: Context) {
             // Upstream .deb packages can contain additional stock-Termux path
             // strings in binaries and maintainer scripts. Relocate them before
             // checking tools or marking the environment ready.
-            relocateAppRootReferences(prefix.toPath())
+            relocateAppRootReferences(prefix.toPath(), log)
             repairExecutablePaths(log)
             log("Checking embedded compiler tools…")
             runShell(
@@ -201,7 +201,7 @@ class EmbeddedToolchain(private val context: Context) {
         // Termux bootstrap ZIPs intentionally store symlink definitions in
         // SYMLINKS.txt instead of storing Unix symlinks in the ZIP itself.
         // Restore absolute-prefix references before recreating those links.
-        relocateAppRootReferences(prefix.toPath())
+        relocateAppRootReferences(prefix.toPath(), log)
         restoreSymlinksFromManifest(log)
 
         directoryModes.sortedByDescending { it.first.absolutePath.length }.forEach { (directory, mode) ->
@@ -283,7 +283,7 @@ class EmbeddedToolchain(private val context: Context) {
             }
 
             log("Detected a stock-Termux path in a package script. Repairing installed files and retrying configuration…")
-            relocateAppRootReferences(prefix.toPath())
+            relocateAppRootReferences(prefix.toPath(), log)
             repairExecutablePaths(log)
             aptArchives.mkdirs()
             File(aptArchives, "partial").mkdirs()
@@ -423,7 +423,7 @@ class EmbeddedToolchain(private val context: Context) {
      * package maintainer scripts. Leaving those strings intact makes apt try
      * writing inside the separate Termux app's private sandbox.
      */
-    private fun relocateAppRootReferences(root: Path) {
+    private fun relocateAppRootReferences(root: Path, log: (String) -> Unit) {
         val replacements = listOf(
             OLD_APP_ROOT.toByteArray(Charsets.UTF_8) to newAppRoot.toByteArray(Charsets.UTF_8),
             OLD_PACKAGE_NAME.toByteArray(Charsets.UTF_8) to context.packageName.toByteArray(Charsets.UTF_8)
@@ -451,7 +451,7 @@ class EmbeddedToolchain(private val context: Context) {
         })
         // This is deliberately logged: the prior version silently skipped unreadable
         // files and left package scripts pointing into /data/data/com.termux.
-        logRelocationSummary(inspectedFiles, rewrittenFiles)
+        log("Relocated embedded package references in " + rewrittenFiles + " of " + inspectedFiles + " files.")
     }
 
     /**
@@ -516,12 +516,4 @@ class EmbeddedToolchain(private val context: Context) {
         return changed
     }
 
-    private fun logRelocationSummary(inspectedFiles: Int, rewrittenFiles: Int) {
-        // Keep the build log informative when the custom app has to relocate
-        // package names embedded by the upstream Termux build.
-        android.util.Log.i(
-            "DSportsRuntime",
-            "Inspected " + inspectedFiles + " embedded files; rewrote " + rewrittenFiles + " path/package references."
-        )
-    }
 }
