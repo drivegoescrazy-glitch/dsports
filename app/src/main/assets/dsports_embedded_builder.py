@@ -197,7 +197,7 @@ def main():
             shutil.rmtree(root)
         run_checked(["git", "clone", "--depth", "1", "--branch", TAG, REPO, str(root)])
     setup = load_setup(root)
-    setup.android_steps = create_termux_android_steps(setup)
+    setup.android_steps = create_embedded_android_steps(setup)
 
     # Two jobs are the conservative default for handhelds; the caller can select more.
     jobs = max(1, min(8, ARGS.jobs))
