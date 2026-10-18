@@ -28,10 +28,10 @@ class EmbeddedToolchain(private val context: Context) {
         private const val BOOTSTRAP_SHA256 =
             "7b170ff5ef0befe501d01febc61382f3c6e34456521853cff9ba0b277aa52fe9"
         private const val OLD_PREFIX = "/data/data/com.termux/files/usr"
-        private const val NEW_PREFIX = "/data/data/com.dsprtf/files/usr"
+        private const val NEW_PREFIX = "/data/data/com.dsprtg/files/usr"
     }
 
-    private val appFiles = File("/data/data/com.dsprtf/files")
+    private val appFiles = File("/data/data/com.dsprtg/files")
     val prefix = File(appFiles, "usr")
     val home = File(appFiles, "home")
     val work = File(appFiles, "dsports-work")
@@ -86,7 +86,7 @@ class EmbeddedToolchain(private val context: Context) {
                 environment()["HOME"] = home.absolutePath
                 environment()["PREFIX"] = prefix.absolutePath
                 environment()["TERMUX_PREFIX"] = prefix.absolutePath
-                environment()["TERMUX_APP__PACKAGE_NAME"] = "com.dsprtf"
+                environment()["TERMUX_APP__PACKAGE_NAME"] = "com.dsprtg"
                 environment()["PATH"] = prefix.absolutePath + "/bin:" + prefix.absolutePath + "/bin/applets:/system/bin:/system/xbin"
                 environment()["LD_LIBRARY_PATH"] = prefix.absolutePath + "/lib"
                 environment()["LD_PRELOAD"] = termuxExec.absolutePath
