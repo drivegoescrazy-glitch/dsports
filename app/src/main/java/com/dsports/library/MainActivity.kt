@@ -2,27 +2,102 @@ package com.dsports.library
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Intent
+import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
-import android.provider.DocumentsContract
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
+import android.provider.OpenableColumns
+import android.provider.Settings
 import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import java.io.InputStream
-import java.security.MessageDigest
-import java.util.Locale
+import java.io.File
+import java.io.OutputStream
 
 class MainActivity : Activity() {
-    private val pickFolder = 101
-    private lateinit var list: LinearLayout
-    private lateinit var status: TextView
+    private val pickRomRequest = 410
+    private val handler = Handler(Looper.getMainLooper())
+    private lateinit var statusView: TextView
+    private lateinit var romView: TextView
+    private lateinit var buildButton: Button
+    private lateinit var installButton: Button
+
+    private var selectedRomUri: Uri? = null
+    private var stagedRomUri: Uri? = null
+    private var statusUri: Uri? = null
+    private var builtApkUri: Uri? = null
+    private var buildLaunched = false
+    private var buildFinishedHandled = false
+
+    private val sharedDir = File(
+        Environment.getExternalStorageDirectory(),
+        Environment.DIRECTORY_DOWNLOADS + "/DSports"
+    )
+    private val stagedRomPath get() = File(sharedDir, "soulsilver.nds").absolutePath
+    private val builderPath get() = File(sharedDir, "dsports_termux_builder.py").absolutePath
+    private val statusPath get() = File(sharedDir, "port-status.txt").absolutePath
+    private val apkPath get() = File(sharedDir, "SoulSilver-ssrecomp.apk").absolutePath
+
+    private val statusPoll = object : Runnable {
+        override fun run() {
+            val uri = statusUri
+            if (uri != null && buildLaunched) {
+                try {
+                    val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                    if (!text.isNullOrBlank()) {
+                        statusView.text = text
+                        if (text.contains("BUILD_SUCCEEDED") && !buildFinishedHandled) {
+                            buildFinishedHandled = true
+                            buildLaunched = false
+                            buildButton.isEnabled = true
+                            stagedRomUri?.let {
+                                try { contentResolver.delete(it, null, null) } catch (_: Exception) {}
+                                stagedRomUri = null
+                            }
+                            MediaScannerConnection.scanFile(
+                                this@MainActivity, arrayOf(apkPath),
+                                arrayOf("application/vnd.android.package-archive")
+                            ) { _, scannedUri ->
+                                runOnUiThread {
+                                    builtApkUri = scannedUri
+                                    installButton.isEnabled = scannedUri != null
+                                    statusView.text = statusView.text.toString() +
+                                        if (scannedUri != null) "\n\nAPK ready. Tap Install ported game." else
+                                            "\n\nBuild completed, but Android could not index the APK. Check Downloads/DSports."
+                                }
+                            }
+                        } else if (text.contains("BUILD_FAILED") && !buildFinishedHandled) {
+                            buildFinishedHandled = true
+                            buildLaunched = false
+                            buildButton.isEnabled = true
+                            statusView.text = text + "\n\nBuild failed. The latest error is shown above."
+                        }
+                    }
+                } catch (_: Exception) {
+                    // The file may be mid-write while the local builder refreshes it.
+                }
+                if (buildLaunched) handler.postDelayed(this, 1200)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
+        window.decorView.systemUiVisibility = (
+            View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            )
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(20, 20, 20, 20)
@@ -30,207 +105,298 @@ class MainActivity : Activity() {
         }
         val left = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(12, 12, 12, 12)
+            setPadding(16, 16, 16, 16)
             setBackgroundColor(0xFF192331.toInt())
         }
-        left.addView(TextView(this).apply { text = "DSPORTS"; textSize = 26f; setTextColor(0xFFFFFFFF.toInt()) })
-        status = TextView(this).apply { text = "Choose your DS folder. Files are read-only."; textSize = 14f; setTextColor(0xFFB8C7D9.toInt()); setPadding(0, 12, 0, 12) }
-        left.addView(status)
-        left.addView(Button(this).apply { text = "Select DS folder"; setOnClickListener { chooseFolder() } })
-        left.addView(Button(this).apply {
-            text = "Native APK build guide (PC)"
-            setOnClickListener { showNativeBuildGuide() }
-        })
-        val nativeStatus = try {
-            NativePortBridge.nativeStatus()
-        } catch (e: Throwable) {
-            "Native core failed to load: " + (e.message ?: "unknown error")
-        }
         left.addView(TextView(this).apply {
-            text = "NATIVE CORE\n\n" + nativeStatus +
-                "\n\nNext: integrate reconstructed SoulSilver game logic and DS hardware services. This bootstrap is not a playable port."
-            textSize = 13f
-            setTextColor(0xFFB8C7D9.toInt())
-            setPadding(0, 20, 0, 0)
+            text = "DSPORTS"
+            textSize = 27f
+            setTextColor(0xFFFFFFFF.toInt())
         })
+        left.addView(TextView(this).apply {
+            text = "NATIVE PORT BUILDER"
+            textSize = 12f
+            setTextColor(0xFF76D5C7.toInt())
+            setPadding(0, 2, 0, 12)
+        })
+        romView = TextView(this).apply {
+            text = "No SoulSilver ROM selected."
+            textSize = 14f
+            setTextColor(0xFFB8C7D9.toInt())
+            setPadding(0, 8, 0, 12)
+        }
+        left.addView(romView)
+        left.addView(Button(this).apply {
+            text = "1 · Select SoulSilver ROM"
+            setOnClickListener { chooseRom() }
+        })
+        buildButton = Button(this).apply {
+            text = "2 · Build playable Android APK"
+            isEnabled = false
+            setOnClickListener { confirmAndBuild() }
+        }
+        left.addView(buildButton)
+        installButton = Button(this).apply {
+            text = "3 · Install ported game"
+            isEnabled = false
+            setOnClickListener { installBuiltGame() }
+        }
+        left.addView(installButton)
+        left.addView(Button(this).apply {
+            text = "On-device compiler setup"
+            setOnClickListener { showTermuxSetup() }
+        })
+        left.addView(TextView(this).apply {
+            text = "Your ROM is processed locally. DSports does not upload it. The generated APK contains your game copy; keep it private."
+            textSize = 12f
+            setTextColor(0xFF93A4B8.toInt())
+            setPadding(0, 16, 0, 0)
+        })
+
         val right = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(18, 12, 12, 12)
             setBackgroundColor(0xFF0D1117.toInt())
         }
-        right.addView(TextView(this).apply { text = "GAME LIBRARY"; textSize = 20f; setTextColor(0xFFFFFFFF.toInt()) })
-        list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        right.addView(ScrollView(this).apply { addView(list) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        root.addView(left, LinearLayout.LayoutParams(0, -1, 0.38f))
-        root.addView(right, LinearLayout.LayoutParams(0, -1, 0.62f))
+        right.addView(TextView(this).apply {
+            text = "LOCAL BUILD LOG"
+            textSize = 20f
+            setTextColor(0xFFFFFFFF.toInt())
+            setPadding(0, 0, 0, 8)
+        })
+        statusView = TextView(this).apply {
+            text = "Ready.\n\nSelect your own US SoulSilver .nds dump, then build. The first build downloads the Android NDK and SDL2 and may take a long time and several gigabytes of temporary storage."
+            textSize = 13f
+            setTextColor(0xFFB8C7D9.toInt())
+            setPadding(12, 12, 12, 12)
+        }
+        right.addView(ScrollView(this).apply {
+            isFillViewport = true
+            addView(statusView)
+        }, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(left, LinearLayout.LayoutParams(0, -1, 0.42f))
+        root.addView(right, LinearLayout.LayoutParams(0, -1, 0.58f))
         setContentView(root)
-        addMessage("No folder selected", "Select the folder containing your .nds files.")
     }
 
+    private fun chooseRom() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        startActivityForResult(intent, pickRomRequest)
+    }
 
-    private fun showNativeBuildGuide() {
+    @Deprecated("Legacy activity result API retained for broad Android compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != pickRomRequest || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        selectedRomUri = uri
+        try {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } catch (_: Exception) {}
+        val name = queryDisplayName(uri) ?: "selected .nds file"
+        romView.text = "Selected:\n$name\n\nThe ROM is staged in Downloads/DSports for the local build. That staged copy is deleted after a successful build."
+        buildButton.isEnabled = true
+        statusView.text = "ROM selected: $name\n\nReady to create the APK locally."
+    }
+
+    private fun confirmAndBuild() {
+        if (selectedRomUri == null) {
+            chooseRom()
+            return
+        }
+        if (Build.VERSION.SDK_INT < 29) {
+            showMessage("Android version unsupported", "The on-device builder requires Android 10 or newer.")
+            return
+        }
         AlertDialog.Builder(this)
-            .setTitle("Native SoulSilver Android build")
+            .setTitle("Build on this device?")
             .setMessage(
-                "A native SoulSilver recompilation project already exists: SSRecomp. " +
-                "Its experimental Android APK is built on a PC from your own .nds file, " +
-                "then transferred to your Android device. The first build can take 20–40 minutes. " +
-                "The resulting APK contains the game, so keep it private.\n\n" +
-                "DSports does not yet perform that build inside Android; this button opens the upstream project and its instructions."
+                "DSports uses Termux as the local compiler environment, then runs the SSRecomp native port pipeline on your handheld. " +
+                    "The first build downloads roughly 700 MB of Android NDK files plus SDL2 and needs additional free storage. " +
+                    "Compilation may take 30–60 minutes or longer. The ROM is not uploaded; it is packaged into the final local APK."
             )
-            .setPositiveButton("Open SSRecomp") { _, _ ->
-                try {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/ClickingMaster/ssrecomp/releases/latest")))
-                } catch (_: Exception) {
-                    status.text = "Open github.com/ClickingMaster/ssrecomp in your browser."
+            .setPositiveButton("Start local build") { _, _ -> prepareAndLaunchBuilder() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun prepareAndLaunchBuilder() {
+        if (packageManager.getLaunchIntentForPackage("com.termux") == null) {
+            showMessage(
+                "Termux is required for the on-device compiler",
+                "Install Termux, open it once, and run:\n\ntermux-setup-storage\npkg update -y\npkg install -y python git cmake ninja clang llvm curl tar\n\nThen complete the one-time integration steps under On-device compiler setup. The build and ROM processing stay on this device."
+            )
+            return
+        }
+
+        buildButton.isEnabled = false
+        installButton.isEnabled = false
+        statusView.text = "Preparing local files…\nThe ROM is not being uploaded."
+        Thread {
+            try {
+                stagedRomUri = writeDownload("soulsilver.nds", "application/octet-stream") { output ->
+                    val source = selectedRomUri ?: throw IllegalStateException("Select a ROM first.")
+                    contentResolver.openInputStream(source)?.use { input -> input.copyTo(output, 1024 * 256) }
+                        ?: throw IllegalStateException("Android could not open the selected ROM.")
                 }
+                writeDownload("dsports_termux_builder.py", "text/x-python") { output ->
+                    assets.open("dsports_termux_builder.py").use { it.copyTo(output) }
+                }
+                statusUri = writeDownload("port-status.txt", "text/plain") { output ->
+                    output.write("Waiting for Termux to start…\n".toByteArray(Charsets.UTF_8))
+                }
+                runOnUiThread { launchTermuxBuilder() }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    buildButton.isEnabled = true
+                    statusView.text = "Could not prepare local files: " + (e.message ?: "unknown error")
+                }
+            }
+        }.start()
+    }
+
+    private fun launchTermuxBuilder() {
+        val commandPath = "/data/data/com.termux/files/usr/bin/bash"
+        val workDir = "/data/data/com.termux/files/home"
+        val command =
+            "set -e; " +
+                "pkg update -y && pkg install -y python git cmake ninja clang llvm curl tar && " +
+                "mkdir -p \"\$HOME/.local/share/dsports\" && " +
+                "cp " + escapeForShell(builderPath) + " \"\$HOME/.local/share/dsports/dsports_termux_builder.py\" && " +
+                "exec python \"\$HOME/.local/share/dsports/dsports_termux_builder.py\" " +
+                "--rom " + escapeForShell(stagedRomPath) + " " +
+                "--status " + escapeForShell(statusPath) + " " +
+                "--output " + escapeForShell(apkPath) + " --jobs 2"
+        try {
+            val intent = Intent("com.termux.RUN_COMMAND").apply {
+                setClassName("com.termux", "com.termux.app.RunCommandService")
+                putExtra("com.termux.RUN_COMMAND_PATH", commandPath)
+                putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-lc", command))
+                putExtra("com.termux.RUN_COMMAND_WORKDIR", workDir)
+                putExtra("com.termux.RUN_COMMAND_BACKGROUND", false)
+                putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "0")
+                putExtra("com.termux.RUN_COMMAND_COMMAND_LABEL", "Build SoulSilver native Android port")
+                putExtra("com.termux.RUN_COMMAND_COMMAND_DESCRIPTION", "Compiles from the ROM selected locally. The ROM is not uploaded.")
+            }
+            startService(intent)
+            buildLaunched = true
+            buildFinishedHandled = false
+            statusView.text = "Termux started. Waiting for the on-device compiler…"
+            handler.removeCallbacks(statusPoll)
+            handler.post(statusPoll)
+        } catch (e: Exception) {
+            buildButton.isEnabled = true
+            statusView.text = "Termux did not accept the build command.\n\n" + (e.message ?: e.javaClass.simpleName)
+            showTermuxSetup()
+        }
+    }
+
+    private fun showTermuxSetup() {
+        AlertDialog.Builder(this)
+            .setTitle("One-time Termux setup")
+            .setMessage(
+                "The compiler runs locally through Termux; the ROM never leaves your device.\n\n" +
+                    "1. Open Termux and run:\ntermux-setup-storage\n\n" +
+                    "2. In Termux, enable external commands:\nmkdir -p ~/.termux && printf '\\nallow-external-apps = true\\n' >> ~/.termux/termux.properties\n\n" +
+                    "3. Close and reopen Termux.\n" +
+                    "4. In Android Settings → Apps → DSports → Permissions → Additional permissions, allow “Run commands in Termux environment”.\n" +
+                    "5. Grant Termux storage access when asked, then return to DSports.\n\n" +
+                    "DSports installs Python, Git, CMake, Ninja and LLVM through Termux when the build starts."
+            )
+            .setPositiveButton("Open Termux") { _, _ ->
+                try { startActivity(packageManager.getLaunchIntentForPackage("com.termux")) } catch (_: Exception) {}
             }
             .setNegativeButton("Close", null)
             .show()
     }
 
-    private fun chooseFolder() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
-        }
-        startActivityForResult(intent, pickFolder)
-    }
-
-    @Deprecated("Legacy activity result API for broad Android compatibility")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != pickFolder || resultCode != RESULT_OK) return
-        val uri = data?.data ?: return
-        try {
-            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            scan(uri)
-        } catch (e: Exception) {
-            status.text = "Could not read folder: " + (e.message ?: "permission denied")
-        }
-    }
-
-    private fun scan(tree: Uri) {
-        list.removeAllViews()
-        val found = mutableListOf<Pair<String, Uri>>()
-        try {
-            val rootId = DocumentsContract.getTreeDocumentId(tree)
-            scanDirectory(tree, rootId, found, 0)
-            found.sortBy { it.first.lowercase(Locale.ROOT) }
-            status.text = "Read-only scan complete · " + found.size + " DS file(s)"
-            if (found.isEmpty()) addMessage("No .nds files found", "Choose the folder that contains your Nintendo DS game files.")
-            found.forEach { (name, uri) ->
-                val lowerName = name.lowercase(Locale.ROOT)
-                val soulSilver = lowerName.contains("soulsilver") || lowerName.contains("soul silver") || lowerName.contains("pokemon_soul") || lowerName.contains("pokémon_soul")
-                val card = LinearLayout(this).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(14, 12, 14, 12)
-                    setBackgroundColor(0xFF192331.toInt())
-                }
-                card.addView(TextView(this).apply { text = name; textSize = 17f; setTextColor(0xFFFFFFFF.toInt()) })
-                card.addView(TextView(this).apply {
-                    text = if (soulSilver) "Pokémon SoulSilver · candidate DS ROM" else "Nintendo DS game file"
-                    textSize = 13f; setTextColor(0xFFB8C7D9.toInt()); setPadding(0, 5, 0, 6)
-                })
-                if (soulSilver) card.addView(Button(this).apply {
-                    text = "Inspect locally for porting"
-                    setOnClickListener { inspectRom(uri, name) }
-                }) else card.addView(TextView(this).apply {
-                    text = "Native port support not configured"; textSize = 12f; setTextColor(0xFF8292A6.toInt())
-                })
-                val params = LinearLayout.LayoutParams(-1, -2)
-                params.bottomMargin = 12
-                list.addView(card, params)
-            }
-        } catch (e: Exception) {
-            status.text = "Scan failed: " + (e.message ?: "unable to read folder")
-            addMessage("Could not scan folder", "Check that Android granted read access to this folder.")
-        }
-    }
-
-    // Read-only local diagnostics: no ROM bytes are copied, uploaded, or written.
-    private fun inspectRom(uri: Uri, displayName: String) {
-        status.text = "Inspecting locally…"
-        Thread {
-            val result = try {
-                val digest = MessageDigest.getInstance("SHA-1")
-                val header = ByteArray(0x200)
-                var headerCount = 0
-                var totalBytes = 0L
-                val buffer = ByteArray(64 * 1024)
-                contentResolver.openInputStream(uri)?.use { input: InputStream ->
-                    while (headerCount < header.size) {
-                        val n = input.read(header, headerCount, header.size - headerCount)
-                        if (n <= 0) break
-                        digest.update(header, headerCount, n)
-                        headerCount += n
-                        totalBytes += n
-                    }
-                    while (true) {
-                        val n = input.read(buffer)
-                        if (n < 0) break
-                        if (n == 0) continue
-                        digest.update(buffer, 0, n)
-                        totalBytes += n
-                    }
-                } ?: throw IllegalStateException("Android could not open this file.")
-                if (headerCount < 0x160) throw IllegalArgumentException("File is too small to contain a Nintendo DS header.")
-                val title = ascii(header, 0, 12)
-                val gameCode = ascii(header, 12, 4)
-                val maker = ascii(header, 16, 2)
-                val sha1 = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
-                val looksLikeSoulSilver = gameCode.startsWith("IPG") || displayName.lowercase(Locale.ROOT).contains("soulsilver")
-                "Local inspection complete\n\nFile: " + displayName +
-                    "\nSize: " + String.format(Locale.US, "%,d bytes", totalBytes) +
-                    "\nHeader title: " + (title.ifBlank { "(blank)" }) +
-                    "\nGame code: " + (gameCode.ifBlank { "(blank)" }) +
-                    "\nMaker code: " + (maker.ifBlank { "(blank)" }) +
-                    "\nSHA-1: " + sha1 +
-                    "\nCandidate: " + (if (looksLikeSoulSilver) "Pokémon SoulSilver / verify against a trusted local reference" else "Not confirmed as SoulSilver") +
-                    "\n\nPrivacy: read-only inspection on this device. The ROM bytes are not sent to a server or included in this project." +
-                    "\n\nNative core: " + try { NativePortBridge.nativeStatus() } catch (e: Throwable) { "unavailable" } +
-                    "\n\nSoulSilver native gameplay is not implemented. This report is diagnostics only."
-            } catch (e: Exception) {
-                "Inspection failed: " + (e.message ?: "unknown error") + "\n\nThe file was not uploaded or modified."
-            }
-            runOnUiThread {
-                status.text = "Local inspection finished"
-                AlertDialog.Builder(this)
-                    .setTitle("Native port readiness · diagnostics")
-                    .setMessage(result)
-                    .setPositiveButton("OK", null)
-                    .show()
-            }
-        }.start()
-    }
-
-    private fun ascii(bytes: ByteArray, start: Int, length: Int): String {
-        return String(bytes, start, length, Charsets.US_ASCII).trim { it <= ' ' || it == '\u0000' }
-    }
-
-    private fun scanDirectory(tree: Uri, documentId: String, output: MutableList<Pair<String, Uri>>, depth: Int) {
-        if (depth > 8 || output.size > 2000) return
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, documentId)
-        val projection = arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE)
-        contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
-            val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-            val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-            val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
-            while (cursor.moveToNext()) {
-                val id = cursor.getString(idCol) ?: continue
-                val name = cursor.getString(nameCol) ?: continue
-                val mime = cursor.getString(mimeCol)
-                if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                    scanDirectory(tree, id, output, depth + 1)
-                } else if (name.lowercase(Locale.ROOT).endsWith(".nds")) {
-                    output.add(name to DocumentsContract.buildDocumentUriUsingTree(tree, id))
+    private fun installBuiltGame() {
+        val uri = builtApkUri
+        if (uri == null) {
+            MediaScannerConnection.scanFile(this, arrayOf(apkPath), arrayOf("application/vnd.android.package-archive")) { _, scanned ->
+                runOnUiThread {
+                    builtApkUri = scanned
+                    if (scanned == null) statusView.text = "Could not find the generated APK at:\n$apkPath"
+                    else installBuiltGame()
                 }
             }
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
+            try {
+                startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            } catch (_: Exception) {
+                showMessage("Allow APK installation", "Enable “Install unknown apps” for DSports in Android Settings, then tap Install ported game again.")
+            }
+            return
+        }
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            })
+        } catch (e: Exception) {
+            showMessage("Could not open installer", e.message ?: "Android could not open the generated APK.")
         }
     }
 
-    private fun addMessage(heading: String, detail: String) {
-        list.addView(TextView(this).apply {
-            text = heading + "\n" + detail; textSize = 15f; setTextColor(0xFFB8C7D9.toInt()); setPadding(0, 20, 0, 20)
-        })
+    private fun writeDownload(name: String, mime: String, writer: (OutputStream) -> Unit): Uri {
+        val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        findDownload(name)?.let { try { contentResolver.delete(it, null, null) } catch (_: Exception) {} }
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/DSports")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(collection, values)
+            ?: throw IllegalStateException("Android could not create Downloads/DSports/$name")
+        try {
+            contentResolver.openOutputStream(uri, "wt")?.use(writer)
+                ?: throw IllegalStateException("Android could not write Downloads/DSports/$name")
+            contentResolver.update(uri, ContentValues().apply {
+                put(MediaStore.MediaColumns.IS_PENDING, 0)
+            }, null, null)
+            return uri
+        } catch (e: Exception) {
+            try { contentResolver.delete(uri, null, null) } catch (_: Exception) {}
+            throw e
+        }
+    }
+
+    private fun findDownload(name: String): Uri? {
+        val cursor = contentResolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.MediaColumns._ID),
+            MediaStore.MediaColumns.DISPLAY_NAME + "=?",
+            arrayOf(name),
+            MediaStore.MediaColumns.DATE_MODIFIED + " DESC"
+        ) ?: return null
+        cursor.use {
+            if (!it.moveToFirst()) return null
+            return ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, it.getLong(0))
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+            if (it.moveToFirst()) return it.getString(0)
+        }
+        return uri.lastPathSegment?.substringAfterLast('/')
+    }
+
+    private fun escapeForShell(value: String): String = "'" + value.replace("'", "'\\''") + "'"
+
+    private fun showMessage(title: String, message: String) {
+        AlertDialog.Builder(this).setTitle(title).setMessage(message).setPositiveButton("OK", null).show()
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacks(statusPoll)
+        super.onDestroy()
     }
 }
