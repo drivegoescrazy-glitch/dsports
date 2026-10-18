@@ -140,6 +140,7 @@ def patch_android_ndk_toolchain(ndk_dir, log_fn):
         ]
 
     text = "\n".join(lines) + "\n"
+    toolchain_file.write_text(text, encoding="utf-8")
     log_fn("Configured NDK CMake to use native ARM64 compiler/LLVM tools; NDK target sysroot remains unchanged.")
 
 
