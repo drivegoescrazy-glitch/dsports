@@ -51,7 +51,7 @@ for required in (
     'environment()["TERMUX__APPS_DIR"] = termuxAppsDir.absolutePath',
     'environment()["TERMUX__APPS_DIR_BY_UID"] = termuxAppsByUidDir.absolutePath',
     'environment()["TERMUX__LEGACY_PROJECT_USER_CONFIG_DIR"] = termuxLegacyUserConfigDir.absolutePath',
-    '"-o Dir::Cache::archives="',
+    '"Dir::Cache::archives="',
     'File(aptArchives, "partial").mkdirs()',
     'runAptCommand("update", log)',
 ):
