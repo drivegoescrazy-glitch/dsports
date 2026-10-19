@@ -13,7 +13,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER_TEMPLATE = ROOT / "app/src/main/assets/dsports_dpkg_wrapper.sh"
 GRADLE_CONFIG = (ROOT / "app/build.gradle.kts").read_text(encoding="utf-8")
-PACKAGE_MATCH = re.search(r'applicationId\\s*=\\s*"([^"]+)"', GRADLE_CONFIG)
+PACKAGE_MATCH = re.search(r'applicationId\s*=\s*"([^"]+)"', GRADLE_CONFIG)
 if not PACKAGE_MATCH:
     raise RuntimeError("Could not derive the DSports applicationId for the wrapper test.")
 OLD_ROOT = "/data/data/com.termux"
