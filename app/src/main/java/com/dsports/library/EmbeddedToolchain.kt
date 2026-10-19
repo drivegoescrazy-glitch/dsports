@@ -456,7 +456,29 @@ class EmbeddedToolchain(private val context: Context) {
         var inspectedFiles = 0
         Files.walkFileTree(root, object : SimpleFileVisitor<Path>() {
             override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-                if (!attrs.isRegularFile || attrs.isSymbolicLink) return FileVisitResult.CONTINUE
+                // Older bootstrap versions could already have recreated absolute
+                // links before the full app root was relocated. Repair link targets
+                // explicitly too; FileVisitor does not follow symbolic links.
+                if (attrs.isSymbolicLink) {
+                    inspectedFiles++
+                    try {
+                        val currentTarget = Files.readSymbolicLink(file).toString()
+                        val fixedTarget = currentTarget
+                            .replace(OLD_APP_ROOT, newAppRoot)
+                            .replace(OLD_PACKAGE_NAME, context.packageName)
+                        if (fixedTarget != currentTarget) {
+                            Files.delete(file)
+                            Os.symlink(fixedTarget, file.toAbsolutePath().toString())
+                            rewrittenFiles++
+                        }
+                    } catch (e: Exception) {
+                        throw IllegalStateException(
+                            "Could not safely inspect or relocate embedded runtime symlink: " + file, e
+                        )
+                    }
+                    return FileVisitResult.CONTINUE
+                }
+                if (!attrs.isRegularFile) return FileVisitResult.CONTINUE
                 inspectedFiles++
                 try {
                     if (rewriteReferencesInFile(file, replacements)) rewrittenFiles++
