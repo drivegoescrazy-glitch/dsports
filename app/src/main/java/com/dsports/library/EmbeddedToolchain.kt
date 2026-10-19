@@ -88,6 +88,8 @@ class EmbeddedToolchain(private val context: Context) {
         // by earlier builds. The official bootstrap ZIP does not reliably preserve
         // executable mode bits for all Termux commands and APT transport helpers.
         repairExecutablePaths(log)
+        ensureDpkgWrapper(log)
+        ensureUpdateAlternativesWrapper(log)
 
         if (!packagesMarker.exists()) {
             log("Updating embedded package indexes with DSports-private cache paths…")
@@ -97,6 +99,10 @@ class EmbeddedToolchain(private val context: Context) {
                 "install -y python git cmake ninja clang llvm lld curl tar patch unzip pkg-config make",
                 log
             )
+            // An update may replace a wrapper along with the package that owns
+            // its executable. Reinstall these after the first package transaction.
+            ensureDpkgWrapper(log)
+            ensureUpdateAlternativesWrapper(log)
             // Upstream .deb packages can contain additional stock-Termux path
             // strings in binaries and maintainer scripts. Relocate them before
             // checking tools or marking the environment ready.
@@ -113,7 +119,10 @@ class EmbeddedToolchain(private val context: Context) {
     }
 
     fun runShell(command: String, workingDirectory: File = home, log: (String) -> Unit) {
-        val process = ProcessBuilder(linker, shell.absolutePath, "-lc", command)
+        // Do not start a login shell: bash in the upstream Termux bootstrap has a
+        // compiled-in /data/data/com.termux profile path. Environment variables
+        // below provide the complete runtime context needed by these commands.
+        val process = ProcessBuilder(linker, shell.absolutePath, "-c", command)
             .directory(workingDirectory)
             .redirectErrorStream(true)
             .apply {
@@ -137,6 +146,8 @@ class EmbeddedToolchain(private val context: Context) {
                 environment()["TERMUX__LEGACY_PROJECT_USER_CONFIG_DIR"] = termuxLegacyUserConfigDir.absolutePath
                 environment()["TERMUX__PREFIX_SUBDIR"] = "usr"
                 environment()["TERMUX__PREFIX"] = prefix.absolutePath
+                environment()["DPKG_ADMINDIR"] = File(prefix, "var/lib/dpkg").absolutePath
+                environment()["DPKG_DATADIR"] = File(prefix, "share/dpkg").absolutePath
                 environment()["PATH"] = prefix.absolutePath + "/bin:" + prefix.absolutePath + "/bin/applets:/system/bin:/system/xbin"
                 environment()["LD_LIBRARY_PATH"] = prefix.absolutePath + "/lib"
                 environment()["LD_PRELOAD"] = termuxExec.absolutePath
@@ -149,19 +160,27 @@ class EmbeddedToolchain(private val context: Context) {
             .start()
 
         val recentOutput = mutableListOf<String>()
+        val importantOutput = mutableListOf<String>()
         BufferedInputStream(process.inputStream).bufferedReader().useLines { lines ->
             lines.forEach { line ->
                 log(line)
                 recentOutput.add(line)
-                if (recentOutput.size > 30) recentOutput.removeAt(0)
+                if (recentOutput.size > 120) recentOutput.removeAt(0)
+                val lower = line.lowercase(Locale.ROOT)
+                if (listOf("error", "failed", "failure", "cannot", "permission denied", "no such file", "dpkg:", "e:", "postinst").any { lower.contains(it) }) {
+                    importantOutput.add(line)
+                    if (importantOutput.size > 20) importantOutput.removeAt(0)
+                }
             }
         }
         val exit = process.waitFor()
         if (exit != 0) {
-            val tail = recentOutput.joinToString("\n")
+            val details = importantOutput.takeLast(12).joinToString("\n")
+            val tail = recentOutput.takeLast(35).joinToString("\n")
             throw IllegalStateException(
                 "Embedded command failed (exit " + exit + "): " + command.take(220) +
-                    if (tail.isBlank()) "" else "\nLast command output:\n" + tail
+                    (if (details.isBlank()) "" else "\nFailure details:\n" + details) +
+                    (if (tail.isBlank()) "" else "\nLast command output:\n" + tail)
             )
         }
     }
@@ -283,14 +302,110 @@ class EmbeddedToolchain(private val context: Context) {
         log("Verified executable permissions for " + repaired + " embedded runtime files.")
     }
 
+    /**
+     * The stock Termux package repository publishes .deb files whose data paths
+     * and maintainer scripts target com.termux. Repackage each archive locally
+     * before the real dpkg installs it, so files land inside DSports' own sandbox.
+     */
+    private fun ensureDpkgWrapper(log: (String) -> Unit) {
+        val binDir = File(prefix, "bin")
+        val dpkgFile = File(binDir, "dpkg")
+        val dpkgReal = File(binDir, "dpkg.real")
+        binDir.mkdirs()
+
+        if (!dpkgFile.exists() && !dpkgReal.exists()) {
+            throw IllegalStateException("Embedded dpkg was not found in " + binDir.absolutePath)
+        }
+        if (dpkgFile.exists()) {
+            val firstBytes = ByteArray(4)
+            try { dpkgFile.inputStream().use { it.read(firstBytes) } } catch (_: Exception) {}
+            val isElf = firstBytes[0] == 0x7F.toByte() &&
+                firstBytes[1] == 'E'.code.toByte() &&
+                firstBytes[2] == 'L'.code.toByte() &&
+                firstBytes[3] == 'F'.code.toByte()
+            if (isElf && !dpkgReal.exists()) {
+                Files.move(dpkgFile.toPath(), dpkgReal.toPath())
+            } else if (isElf) {
+                Files.deleteIfExists(dpkgFile.toPath())
+            } else {
+                val firstLine = try { dpkgFile.bufferedReader().use { it.readLine() } } catch (_: Exception) { null }
+                if (firstLine?.startsWith("#!") != true && !dpkgReal.exists()) {
+                    Files.move(dpkgFile.toPath(), dpkgReal.toPath())
+                }
+            }
+        }
+        if (!dpkgReal.isFile) {
+            throw IllegalStateException("Could not preserve the original dpkg executable at " + dpkgReal.absolutePath)
+        }
+
+        val replacements = mapOf(
+            "@@PREFIX@@" to prefix.absolutePath,
+            "@@OLD_ROOT@@" to OLD_APP_ROOT,
+            "@@NEW_ROOT@@" to newAppRoot,
+            "@@PACKAGE_NAME@@" to context.packageName
+        )
+        val template = assets.open("dsports_dpkg_wrapper.sh").use { it.readBytes().toString(Charsets.UTF_8) }
+        var script = template
+        for ((key, value) in replacements) script = script.replace(key, value)
+        dpkgFile.writeText(script)
+        Os.chmod(dpkgFile.absolutePath, 0x1C0)
+        log("Installed package-relocating dpkg wrapper; future .deb maintainer scripts will run under DSports paths.")
+    }
+
+    /**
+     * Debian's update-alternatives helper can use stock Termux paths even when
+     * invoked by a correctly relocated package script; override all writable state.
+     */
+    private fun ensureUpdateAlternativesWrapper(log: (String) -> Unit) {
+        val binDir = File(prefix, "bin")
+        val command = File(binDir, "update-alternatives")
+        val real = File(binDir, "update-alternatives.real")
+        if (!command.exists() && !real.exists()) return
+
+        if (command.exists()) {
+            val firstBytes = ByteArray(4)
+            try { command.inputStream().use { it.read(firstBytes) } } catch (_: Exception) {}
+            val isElf = firstBytes[0] == 0x7F.toByte() &&
+                firstBytes[1] == 'E'.code.toByte() &&
+                firstBytes[2] == 'L'.code.toByte() &&
+                firstBytes[3] == 'F'.code.toByte()
+            if (isElf && !real.exists()) Files.move(command.toPath(), real.toPath())
+            else if (isElf) Files.deleteIfExists(command.toPath())
+            else if (!real.exists()) {
+                val firstLine = try { command.bufferedReader().use { it.readLine() } } catch (_: Exception) { null }
+                if (firstLine?.startsWith("#!") != true) Files.move(command.toPath(), real.toPath())
+            }
+        }
+        if (!real.isFile) return
+
+        val template = assets.open("dsports_update_alternatives_wrapper.sh").use { it.readBytes().toString(Charsets.UTF_8) }
+        val script = template.replace("@@PREFIX@@", prefix.absolutePath)
+        command.writeText(script)
+        Os.chmod(command.absolutePath, 0x1C0)
+        log("Installed update-alternatives wrapper with DSports-local state directories.")
+    }
+
     private fun runAptCommand(arguments: String, log: (String) -> Unit) {
         // Stock Termux apt normally stores downloaded archives under
         // /data/data/com.termux/cache. Pin its archive cache to DSports' own
         // private Android cache directory, including apt's required partial dir.
         aptArchives.mkdirs()
         File(aptArchives, "partial").mkdirs()
-        val cacheOption = "-o Dir::Cache::archives=" + shellQuote(aptArchives.absolutePath)
-        val command = "export DEBIAN_FRONTEND=noninteractive; apt-get " + cacheOption + " " + arguments
+        val localAptOptions = listOf(
+            "Dir::Cache::archives=" + aptArchives.absolutePath,
+            "Dir::Cache::pkgcache=" + File(prefix, "var/cache/apt/pkgcache.bin").absolutePath,
+            "Dir::Cache::srcpkgcache=" + File(prefix, "var/cache/apt/srcpkgcache.bin").absolutePath,
+            "Dir::State::status=" + File(prefix, "var/lib/dpkg/status").absolutePath,
+            "Dir::State::lists=" + File(prefix, "var/lib/apt/lists").absolutePath,
+            "Dir::Etc::sourcelist=" + File(prefix, "etc/apt/sources.list").absolutePath,
+            "Dir::Etc::sourceparts=" + File(prefix, "etc/apt/sources.list.d").absolutePath,
+            "Dir::Etc::main=" + File(prefix, "etc/apt/apt.conf").absolutePath,
+            "Dir::Log=" + File(prefix, "var/log/apt").absolutePath
+        ).joinToString(" ") { "-o " + shellQuote(it) }
+        File(prefix, "var/cache/apt").mkdirs()
+        File(prefix, "var/lib/apt/lists/partial").mkdirs()
+        File(prefix, "var/log/apt").mkdirs()
+        val command = "export DEBIAN_FRONTEND=noninteractive; apt-get " + localAptOptions + " " + arguments
         try {
             runShell(command, home, log)
         } catch (first: Exception) {
@@ -504,6 +619,21 @@ class EmbeddedToolchain(private val context: Context) {
         path: Path,
         replacements: List<Pair<ByteArray, ByteArray>>
     ): Boolean {
+        // Binary paths are not safely fixed by text substitution. Skip ELF and
+        // files containing NULs; package script/data paths are fixed separately
+        // in the dpkg wrapper before installation.
+        RandomAccessFile(path.toFile(), "r").use { probe ->
+            val sample = ByteArray(minOf(8192L, probe.length()).toInt())
+            if (sample.isNotEmpty()) probe.readFully(sample)
+            if (sample.size >= 4 &&
+                sample[0] == 0x7F.toByte() &&
+                sample[1] == 'E'.code.toByte() &&
+                sample[2] == 'L'.code.toByte() &&
+                sample[3] == 'F'.code.toByte()
+            ) return false
+            if (sample.any { it == 0.toByte() }) return false
+        }
+
         var changed = false
         RandomAccessFile(path.toFile(), "rw").use { file ->
             val fileSize = file.length()
