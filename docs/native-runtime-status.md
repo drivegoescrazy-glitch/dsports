@@ -1,36 +1,36 @@
 # SoulSilver native runtime and Android build
 
-## The practical native-port route
+## Current route
 
-DSports now has a small C++/JNI bootstrap, but that bootstrap is not itself a playable port. The most direct existing native recompilation route found for SoulSilver is [ClickingMaster/ssrecomp](https://github.com/ClickingMaster/ssrecomp). It statically recompiles SoulSilver's ARM9 code to C++ and uses a patched melonDS core for Nintendo DS hardware services, including graphics, sound, saves and ARM7. The project documents an experimental Android build.
+DSports builds the playable port **on the device** with [ClickingMaster/ssrecomp](https://github.com/ClickingMaster/ssrecomp), pinned to tag `v0.4.2`. SSRecomp statically recompiles SoulSilver's ARM9 code to C++ and uses a patched melonDS core for Nintendo DS hardware services, including graphics, sound, saves and ARM7.
 
-The Android APK is built on a **PC**, using the user's own SoulSilver dump. The upstream project states that the first build may take 20–40 minutes and that the resulting APK contains the game. This is not a one-tap conversion inside the current DSports Android app.
+The APK is produced from the user's own dump. Nothing of the game is downloaded, and no ROM bytes leave the device.
 
-## Build on Windows
+## What DSports adds on top of upstream
 
-From the DSports checkout, open PowerShell and run:
+| Concern | DSports behaviour |
+| --- | --- |
+| Host compilers | The downloaded NDK is a Linux/x86_64 bundle whose host binaries cannot run on Android. DSports rewrites `ANDROID_C_COMPILER`, `ANDROID_CXX_COMPILER`, `ANDROID_ASM_COMPILER`, `ANDROID_AR`, `ANDROID_RANLIB` and `ANDROID_STRIP` to the embedded ARM64 tools and keeps the NDK's headers, crt objects and per-ABI libraries. |
+| Link flags | The NDK's `c++_static` path adds `-static-libstdc++`, which is a GCC flag that clang rejects. DSports removes it; clang already links the NDK's `libc++_static.a` for an Android target. |
+| Package lookup | SDL2 is built outside the NDK, so package lookup is widened with `CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH` instead of being restricted to the NDK. |
+| Fail fast | Before configuring anything, DSports compiles and links a C and a C++ shared library for `aarch64-linux-android24` and checks that the result is an ARM64 ELF. A missing sysroot, crt object or C++ standard library now fails in seconds with the compiler's own message. |
+| Display defaults | The chosen layout, world detail, smooth scaling, widescreen and fullscreen settings are patched into the frontend's `Settings` struct. Each pattern must match exactly once, so an upstream layout change fails the build instead of silently shipping the wrong defaults. |
+| APK verification | The finished APK is opened as a ZIP, tested entry by entry, checked for `libmain.so`, `libSDL2.so`, `assets/rom.nds`, the manifest, `classes.dex` and the APK Signature Scheme v2 block, and rejected if any is missing. |
 
-```powershell
-.\tools\build_soulsilver_android.ps1 -RomPath "D:\Games\SoulSilver.nds"
-```
+Display settings available both in DSports and in the port's pause menu:
 
-Optional parameters:
-
-```powershell
-.\tools\build_soulsilver_android.ps1 -RomPath "D:\Games\SoulSilver.nds" -OutputPath "D:\PrivateBuilds\SoulSilver.apk" -Jobs 4
-```
-
-The helper pins the SSRecomp source to tag `v0.3.0` and keeps source, generated code, build files and the source ROM path outside the DSports checkout under the user's local application data directory. It requires Git, Python 3, CMake and Ninja on the PC; SSRecomp downloads its Android NDK and SDL2 build dependencies. Windows/Android support is experimental, so failures must be debugged from the build output.
-
-After building, transfer the APK to your own Android device and install it. The APK contains your copy of the game; do not upload it to GitHub, attach it to releases, or share it.
+- **Layout** — merged (one combined view), dual side-by-side, dual stacked, hybrid (large screen plus inset).
+- **World detail** — the maximum number of lines the widescreen 3D world is drawn at: native 192, 540, 720, 1080 or 1440.
+- **Smooth scaling** — filtered instead of nearest-pixel scaling.
+- **Widescreen world** — the overworld 3D view fills the whole display width.
 
 ## Boundaries
 
 - Never commit the ROM, extracted assets, generated game code, save data, or the game-containing APK.
 - Never send ROM bytes to GitHub Actions, logs, issues, or release artifacts.
-- The DSports GitHub Actions job only compiles the DSports app and its small JNI bootstrap; it does not receive game data.
+- The DSports GitHub Actions job only compiles the DSports app and exercises the builder's device-independent logic; it does not receive game data.
 - The SSRecomp source has its own license and project terms. Review them before redistributing or incorporating its source into DSports.
 
 ## DSports native bootstrap
 
-The C++ library under `app/src/main/cpp/` currently only confirms that JNI and NDK packaging work. It does not execute SoulSilver. Do not advertise the DSports APK itself as a playable native SoulSilver port until the actual runtime is integrated and tested.
+The C++ library under `app/src/main/cpp/` only confirms that JNI and NDK packaging work. It does not execute SoulSilver.

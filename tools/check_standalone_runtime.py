@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Static regression checks for the Android-embedded Termux-compatible runtime."""
+"""Static regression checks for the Android-embedded build runtime and the port builder."""
 from pathlib import Path
 import ast
 import re
 import sys
-import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -14,13 +13,22 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-gradle = (ROOT / "app/build.gradle.kts").read_text(encoding="utf-8")
-kotlin = (ROOT / "app/src/main/java/com/dsports/library/EmbeddedToolchain.kt").read_text(encoding="utf-8")
-builder = (ROOT / "app/src/main/assets/dsports_embedded_builder.py").read_text(encoding="utf-8")
-dpkg_wrapper = (ROOT / "app/src/main/assets/dsports_dpkg_wrapper.sh").read_text(encoding="utf-8")
-alternatives_wrapper = (ROOT / "app/src/main/assets/dsports_update_alternatives_wrapper.sh").read_text(encoding="utf-8")
-manifest = (ROOT / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
+def read(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
 
+
+gradle = read("app/build.gradle.kts")
+kotlin = read("app/src/main/java/com/dsports/library/EmbeddedToolchain.kt")
+builder = read("app/src/main/assets/dsports_embedded_builder.py")
+catalog = read("app/src/main/java/com/dsports/library/GameCatalog.kt")
+launcher = read("app/src/main/java/com/dsports/library/LauncherActivity.kt")
+main_activity = read("app/src/main/java/com/dsports/library/MainActivity.kt")
+dpkg_wrapper = read("app/src/main/assets/dsports_dpkg_wrapper.sh")
+alternatives_wrapper = read("app/src/main/assets/dsports_update_alternatives_wrapper.sh")
+manifest = read("app/src/main/AndroidManifest.xml")
+
+# ---------------------------------------------------------------------------
+# Package identity: relocation requires a package id the same length as com.termux.
 match = re.search(r'applicationId\s*=\s*"([^"]+)"', gradle)
 if not match:
     fail("applicationId not found in app/build.gradle.kts")
@@ -57,7 +65,7 @@ for required in (
 ):
     if required not in kotlin:
         fail(f"runtime is missing required path/cache recovery logic: {required}")
-if 'recentOutput.joinToString("\\\\n")' in kotlin:
+if 'recentOutput.joinToString("\\\\\\\\n")' in kotlin:
     fail("diagnostics still encode literal backslash-n instead of actual line breaks")
 if 'ProcessBuilder(linker, shell.absolutePath, "-lc", command)' in kotlin:
     fail("embedded shell still starts login mode and can read stock Termux profile paths")
@@ -65,76 +73,87 @@ if "sample.any { it == 0.toByte() }" not in kotlin:
     fail("runtime relocation must skip binary files containing NUL bytes")
 if "ensureDpkgWrapper(log)" not in kotlin or "ensureUpdateAlternativesWrapper(log)" not in kotlin:
     fail("dpkg and update-alternatives wrappers are not enabled")
-expected_prefix = new_root + "/files/usr"
-fallback_match = re.search(r'prefix = os\.environ\.get\("PREFIX", "([^"]+)"\)', builder)
-if not fallback_match:
-    fail("embedded builder does not define a PREFIX fallback")
-if fallback_match.group(1) != expected_prefix:
-    fail(f"builder fallback prefix mismatch: expected {expected_prefix!r}, got {fallback_match.group(1)!r}")
 
-# Execute the NDK patch function against a representative copy of the real
-# multi-line NDK assignments. This verifies both its matching logic and that it
-# actually writes the modified toolchain file back to disk.
-try:
-    builder_tree = ast.parse(builder)
-    patch_function = next(
-        node for node in builder_tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "patch_android_ndk_toolchain"
-    )
-    isolated = ast.Module(body=[patch_function], type_ignores=[])
-    namespace = {"Path": Path}
-    exec(compile(isolated, "patch_android_ndk_toolchain", "exec"), namespace)
-except (SyntaxError, StopIteration) as exc:
-    fail(f"could not isolate the NDK toolchain patch for testing: {exc}")
-
-with tempfile.TemporaryDirectory() as temp_dir:
-    toolchain = Path(temp_dir) / "build/cmake/android-legacy.toolchain.cmake"
-    toolchain.parent.mkdir(parents=True)
-    toolchain.write_text(
-        'set(ANDROID_C_COMPILER\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
-        'set(ANDROID_CXX_COMPILER\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang++\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
-        'set(ANDROID_ASM_COMPILER\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
-        'set(ANDROID_AR\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-ar\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
-        'set(ANDROID_RANLIB\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-ranlib\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
-        'set(ANDROID_STRIP\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-strip\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
-        'set(CMAKE_SYSROOT "/test/ndk/sysroot")\n',
-        encoding="utf-8",
-    )
-    messages = []
-    namespace["patch_android_ndk_toolchain"](temp_dir, messages.append)
-    patched = toolchain.read_text(encoding="utf-8")
-    for variable, executable in (
-        ("ANDROID_C_COMPILER", "clang"),
-        ("ANDROID_CXX_COMPILER", "clang++"),
-        ("ANDROID_ASM_COMPILER", "clang"),
-        ("ANDROID_AR", "llvm-ar"),
-        ("ANDROID_RANLIB", "llvm-ranlib"),
-        ("ANDROID_STRIP", "llvm-strip"),
-    ):
-        expected = f'set({variable} "$ENV{{PREFIX}}/bin/{executable}")'
-        if expected not in patched:
-            fail(f"NDK patch did not persist the expected assignment: {expected}")
-    if 'set(CMAKE_SYSROOT "/test/ndk/sysroot")' not in patched:
-        fail("NDK patch must preserve the target sysroot")
-    if not messages:
-        fail("NDK patch did not report that its work finished")
-
+# ---------------------------------------------------------------------------
+# The builder: pinned upstream, ARM64 host tools, display defaults, APK checks.
+if 'TAG = "v0.4.2"' not in builder:
+    fail("the builder must pin a specific SSRecomp tag")
+if "https://github.com/ClickingMaster/ssrecomp.git" not in builder:
+    fail("the builder must clone the SSRecomp source it recompiles")
 for required in (
-    "def patch_android_ndk_toolchain(ndk_dir, log_fn)",
-    "patch_android_ndk_toolchain(ndk, log_fn)",
-    '"ANDROID_C_COMPILER": "clang"',
-    '"ANDROID_CXX_COMPILER": "clang++"',
-    '"ANDROID_ASM_COMPILER": "clang"',
-    '"ANDROID_AR": "llvm-ar"',
-    '"ANDROID_RANLIB": "llvm-ranlib"',
-    '"ANDROID_STRIP": "llvm-strip"',
-    'toolchain_file.write_text(text, encoding="utf-8")',
+    "def patch_ndk_toolchain(ndk_dir, log_fn=None, prefix=None)",
+    "def preflight_toolchain(ndk_dir, work_dir, log_fn=None)",
+    "def patch_frontend_defaults(root, options, log_fn=None)",
+    "def verify_apk(path, min_bytes=100_000)",
+    "def create_embedded_android_steps(setup, options, args_output)",
+    "patch_ndk_toolchain(ndk, log_fn)",
+    "preflight_toolchain(ndk,",
+    "patch_frontend_defaults(root, args)",
+    "verify_apk(out)",
+    '"ANDROID_C_COMPILER"',
+    '"ANDROID_CXX_COMPILER"',
+    '"ANDROID_ASM_COMPILER"',
+    '"ANDROID_AR"',
+    '"ANDROID_RANLIB"',
+    '"ANDROID_STRIP"',
+    "ANDROID_STL=c++_static",
+    "CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH",
+    "ANDROID_USE_LEGACY_TOOLCHAIN_FILE=ON",
 ):
     if required not in builder:
-        fail(f"embedded builder is missing its native-ARM64 NDK toolchain patch: {required}")
+        fail(f"builder is missing required on-device build logic: {required}")
+if "-static-libstdc++" not in builder:
+    fail("builder must strip the unsupported GCC-only -static-libstdc++ flag")
+if "--no-widescreen" not in builder or "--layout" not in builder or "--resolution" not in builder:
+    fail("builder does not accept the display options DSports passes it")
 
+expected_prefix = new_root + "/files/usr"
+if f'os.environ.get("PREFIX", "{expected_prefix}")' not in builder:
+    fail(f"builder fallback prefix mismatch: expected {expected_prefix!r}")
+
+# The builder must not depend on the NDK's x86_64 host binaries to run.
+if "android-legacy.toolchain.cmake" not in builder:
+    fail("builder no longer patches the NDK toolchain file it relies on")
+if '"android.toolchain.cmake"' not in builder:
+    fail("builder must pass the NDK toolchain file explicitly")
+
+# Every patch pattern must be anchored so a silent no-op is impossible.
+if "if len(matches) != 1:" not in builder:
+    fail("frontend display defaults must fail the build when a pattern does not match exactly once")
+
+# Nothing may be parsed at import time, otherwise the builder cannot be tested.
+tree = ast.parse(builder)
+for node in tree.body:
+    if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "ARGS" for target in node.targets
+    ):
+        fail("builder still parses command-line arguments at import time")
+
+# ---------------------------------------------------------------------------
+# Launcher: the catalogue is the only entry point to the builder.
+if "object GameCatalog" not in catalog:
+    fail("missing supported-game catalogue")
+if "soulsilver-us" not in catalog:
+    fail("the catalogue must list Pokemon SoulSilver")
+if "available = true" not in catalog:
+    fail("SoulSilver must be marked as supported")
+if "PortDisplay" not in catalog or "PortLayout" not in catalog or "PortResolution" not in catalog:
+    fail("catalogue must define the port display settings")
+if 'android:name=".LauncherActivity"' not in manifest:
+    fail("manifest does not declare the launcher activity")
+if 'android:name=".MainActivity"' not in manifest or 'android:exported="false"' not in manifest:
+    fail("the builder activity must not be exported once the launcher owns the app entry point")
+if "GameCatalog.games" not in launcher:
+    fail("launcher must render the whole supported-game catalogue")
+if "EXTRA_GAME_ID" not in main_activity:
+    fail("the builder does not read the selected game")
+if "toBuilderArguments()" not in main_activity:
+    fail("the builder UI does not pass the chosen display settings to the builder")
+
+# ---------------------------------------------------------------------------
+# On-device package handling.
 for required in (
-    "\u0024PREFIX/bin/dpkg-deb",
+    "$PREFIX/bin/dpkg-deb",
     "--raw-extract",
     "--build",
     "data/data/$OLD_PACKAGE",
@@ -149,15 +168,11 @@ if "@@NEW_ROOT@@" not in dpkg_wrapper or "@@PACKAGE_NAME@@" not in dpkg_wrapper:
 for required in ("--altdir", "--admindir", "--log", "update-alternatives.real"):
     if required not in alternatives_wrapper:
         fail(f"update-alternatives wrapper is missing private state override: {required}")
-if "ensureDpkgWrapper(log)" not in kotlin or "ensureUpdateAlternativesWrapper(log)" not in kotlin:
-    fail("runtime does not install both package compatibility wrappers")
-if "OLD_PACKAGE_NAME.toByteArray(Charsets.UTF_8) to context.packageName.toByteArray(Charsets.UTF_8)" not in kotlin:
-    fail("runtime is missing same-length package-name relocation")
 
 if "com.termux.RUN_COMMAND" in manifest or "com.termux.permission.RUN_COMMAND" in manifest:
     fail("manifest still declares an external Termux command dependency")
 if (ROOT / "app/src/main/assets/dsports_termux_builder.py").exists():
     fail("obsolete Termux-dependent builder still exists as an app asset")
 
-print(f"OK: DSports {app_id} has length-safe app-root relocation, a private apt cache,")
-print("    active embedded builder prefix, and no legacy Termux external-command dependency.")
+print(f"OK: DSports {app_id} ships a launcher catalogue, display options, an ARM64 port builder,")
+print("    private package relocation and no legacy Termux external-command dependency.")

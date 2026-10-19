@@ -30,6 +30,12 @@ class MainActivity : Activity() {
     private lateinit var romView: TextView
     private lateinit var buildButton: Button
     private lateinit var installButton: Button
+    private lateinit var layoutButton: Button
+    private lateinit var resolutionButton: Button
+    private lateinit var smoothButton: Button
+    private lateinit var widescreenButton: Button
+    private lateinit var game: SupportedGame
+    private lateinit var display: PortDisplay
     private var selectedRomUri: Uri? = null
     private var builtApkUri: Uri? = null
     @Volatile private var buildRunning = false
@@ -56,6 +62,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        game = GameCatalog.byId(intent?.getStringExtra(GameCatalog.EXTRA_GAME_ID))
+        display = PortDisplay.load(this)
         window.decorView.systemUiVisibility = (
             View.SYSTEM_UI_FLAG_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
@@ -72,26 +80,34 @@ class MainActivity : Activity() {
             setPadding(16, 16, 16, 16)
             setBackgroundColor(0xFF192331.toInt())
         }
-        left.addView(TextView(this).apply {
-            text = "DSPORTS"
-            textSize = 27f
-            setTextColor(0xFFFFFFFF.toInt())
+        left.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(TextView(this@MainActivity).apply {
+                text = "DSPORTS"
+                textSize = 27f
+                setTextColor(0xFFFFFFFF.toInt())
+            })
+            addView(Button(this@MainActivity).apply {
+                text = "Games"
+                textSize = 12f
+                setOnClickListener { openLauncher() }
+            }, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = 16 })
         })
         left.addView(TextView(this).apply {
-            text = "STANDALONE NATIVE PORT BUILDER"
+            text = game.title.uppercase() + " · " + game.region
             textSize = 12f
             setTextColor(0xFF76D5C7.toInt())
             setPadding(0, 2, 0, 12)
         })
         romView = TextView(this).apply {
-            text = "No SoulSilver ROM selected."
+            text = "No " + game.title + " ROM selected."
             textSize = 14f
             setTextColor(0xFFB8C7D9.toInt())
             setPadding(0, 8, 0, 12)
         }
         left.addView(romView)
         left.addView(Button(this).apply {
-            text = "1 · Select SoulSilver ROM"
+            text = "1 · Select " + game.title + " ROM"
             setOnClickListener { chooseRom() }
         })
         buildButton = Button(this).apply {
@@ -106,10 +122,52 @@ class MainActivity : Activity() {
             setOnClickListener { installBuiltGame() }
         }
         left.addView(installButton)
+        left.addView(TextView(this).apply {
+            text = "PORT DISPLAY"
+            textSize = 11f
+            letterSpacing = 0.16f
+            setTextColor(0xFF76D5C7.toInt())
+            setPadding(0, 18, 0, 6)
+        })
+        layoutButton = Button(this).apply {
+            textSize = 12f
+            setOnClickListener { cycleLayout() }
+        }
+        left.addView(layoutButton)
+        resolutionButton = Button(this).apply {
+            textSize = 12f
+            setOnClickListener { cycleResolution() }
+        }
+        left.addView(resolutionButton)
+        smoothButton = Button(this).apply {
+            textSize = 12f
+            setOnClickListener {
+                display = display.copy(smoothScaling = !display.smoothScaling)
+                PortDisplay.save(this@MainActivity, display)
+                refreshDisplayButtons()
+            }
+        }
+        left.addView(smoothButton)
+        widescreenButton = Button(this).apply {
+            textSize = 12f
+            setOnClickListener {
+                display = display.copy(widescreenWorld = !display.widescreenWorld)
+                PortDisplay.save(this@MainActivity, display)
+                refreshDisplayButtons()
+            }
+        }
+        left.addView(widescreenButton)
+        left.addView(TextView(this).apply {
+            text = "These are the port's starting settings. Its pause menu (MENU button or Esc) can change them while playing."
+            textSize = 11f
+            setTextColor(0xFF93A4B8.toInt())
+            setPadding(0, 6, 0, 0)
+        })
         left.addView(Button(this).apply {
             text = "Standalone builder details"
             setOnClickListener { showBuilderDetails() }
         })
+        refreshDisplayButtons()
         left.addView(TextView(this).apply {
             text = "The ROM stays in DSports private storage and is never uploaded. The generated APK contains your game copy; keep it private."
             textSize = 12f
@@ -138,9 +196,40 @@ class MainActivity : Activity() {
             isFillViewport = true
             addView(statusView)
         }, LinearLayout.LayoutParams(-1, 0, 1f))
-        root.addView(left, LinearLayout.LayoutParams(0, -1, 0.42f))
+        // The controls column must stay reachable on short handheld displays.
+        root.addView(ScrollView(this).apply {
+            isFillViewport = true
+            addView(left)
+        }, LinearLayout.LayoutParams(0, -1, 0.42f))
         root.addView(right, LinearLayout.LayoutParams(0, -1, 0.58f))
         setContentView(root)
+    }
+
+    private fun openLauncher() {
+        startActivity(Intent(this, LauncherActivity::class.java))
+        finish()
+    }
+
+    private fun refreshDisplayButtons() {
+        layoutButton.text = "Screen · " + display.layout.label
+        layoutButton.contentDescription = display.layout.description
+        resolutionButton.text = "World detail · " + display.resolution.label
+        smoothButton.text = "Smooth scaling · " + if (display.smoothScaling) "on" else "off"
+        widescreenButton.text = "Widescreen world · " + if (display.widescreenWorld) "on" else "off"
+    }
+
+    private fun cycleLayout() {
+        val next = (display.layout.ordinal + 1) % PortLayout.entries.size
+        display = display.copy(layout = PortLayout.entries[next])
+        PortDisplay.save(this, display)
+        refreshDisplayButtons()
+    }
+
+    private fun cycleResolution() {
+        val next = (display.resolution.ordinal + 1) % PortResolution.entries.size
+        display = display.copy(resolution = PortResolution.entries[next])
+        PortDisplay.save(this, display)
+        refreshDisplayButtons()
     }
 
     private fun chooseRom() {
@@ -221,10 +310,12 @@ class MainActivity : Activity() {
                 outputApk.delete()
                 processLog.delete()
                 writeStatus("Standalone compiler is ready. Generating native C++ and building the Android game APK…")
+                val displayArguments = display.toBuilderArguments().joinToString(" ") { escapeForShell(it) }
                 val cmd = "exec python " + escapeForShell(script.absolutePath) +
                     " --rom " + escapeForShell(stagedRom.absolutePath) +
                     " --status " + escapeForShell(statusFile.absolutePath) +
-                    " --output " + escapeForShell(outputApk.absolutePath) + " --jobs 2"
+                    " --output " + escapeForShell(outputApk.absolutePath) +
+                    " --jobs 2 " + displayArguments
                 toolchain.runShell(cmd, toolchain.home) { line -> appendRuntimeLog(line) }
 
                 val resultText = if (statusFile.isFile) statusFile.readText() else ""
