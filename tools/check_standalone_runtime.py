@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Static regression checks for the Android-embedded Termux-compatible runtime."""
 from pathlib import Path
+import ast
 import re
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,6 +34,8 @@ if 'private const val OLD_PACKAGE_NAME = "com.termux"' not in kotlin:
     fail("embedded runtime must define the stock package-name relocation source")
 if "OLD_PACKAGE_NAME.toByteArray(Charsets.UTF_8) to context.packageName.toByteArray(Charsets.UTF_8)" not in kotlin:
     fail("embedded runtime must relocate bare package-name strings inside binaries")
+if "Files.readSymbolicLink(file).toString()" not in kotlin or "Os.symlink(fixedTarget, file.toAbsolutePath().toString())" not in kotlin:
+    fail("existing absolute symlink targets must also be relocated during migration")
 if "RandomAccessFile(path.toFile(), \"rw\")" not in kotlin:
     fail("runtime path rewriting must scan in blocks to avoid loading large compiler binaries into memory")
 if 'private val appRoot = File("/data/data/${context.packageName}")' not in kotlin:
@@ -60,6 +64,53 @@ if not fallback_match:
     fail("embedded builder does not define a PREFIX fallback")
 if fallback_match.group(1) != expected_prefix:
     fail(f"builder fallback prefix mismatch: expected {expected_prefix!r}, got {fallback_match.group(1)!r}")
+
+# Execute the NDK patch function against a representative copy of the real
+# multi-line NDK assignments. This verifies both its matching logic and that it
+# actually writes the modified toolchain file back to disk.
+try:
+    builder_tree = ast.parse(builder)
+    patch_function = next(
+        node for node in builder_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "patch_android_ndk_toolchain"
+    )
+    isolated = ast.Module(body=[patch_function], type_ignores=[])
+    namespace = {"Path": Path}
+    exec(compile(isolated, "patch_android_ndk_toolchain", "exec"), namespace)
+except (SyntaxError, StopIteration) as exc:
+    fail(f"could not isolate the NDK toolchain patch for testing: {exc}")
+
+with tempfile.TemporaryDirectory() as temp_dir:
+    toolchain = Path(temp_dir) / "build/cmake/android-legacy.toolchain.cmake"
+    toolchain.parent.mkdir(parents=True)
+    toolchain.write_text(
+        'set(ANDROID_C_COMPILER\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
+        'set(ANDROID_CXX_COMPILER\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang++\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
+        'set(ANDROID_ASM_COMPILER\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
+        'set(ANDROID_AR\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-ar\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
+        'set(ANDROID_RANLIB\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-ranlib\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
+        'set(ANDROID_STRIP\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-strip\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
+        'set(CMAKE_SYSROOT "/test/ndk/sysroot")\\n',
+        encoding="utf-8",
+    )
+    messages = []
+    namespace["patch_android_ndk_toolchain"](temp_dir, messages.append)
+    patched = toolchain.read_text(encoding="utf-8")
+    for variable, executable in (
+        ("ANDROID_C_COMPILER", "clang"),
+        ("ANDROID_CXX_COMPILER", "clang++"),
+        ("ANDROID_ASM_COMPILER", "clang"),
+        ("ANDROID_AR", "llvm-ar"),
+        ("ANDROID_RANLIB", "llvm-ranlib"),
+        ("ANDROID_STRIP", "llvm-strip"),
+    ):
+        expected = f'set({variable} "$ENV{{PREFIX}}/bin/{executable}")'
+        if expected not in patched:
+            fail(f"NDK patch did not persist the expected assignment: {expected}")
+    if 'set(CMAKE_SYSROOT "/test/ndk/sysroot")' not in patched:
+        fail("NDK patch must preserve the target sysroot")
+    if not messages:
+        fail("NDK patch did not report that its work finished")
 
 for required in (
     "def patch_android_ndk_toolchain(ndk_dir, log_fn)",
