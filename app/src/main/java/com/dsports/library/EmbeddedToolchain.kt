@@ -391,19 +391,29 @@ class EmbeddedToolchain(private val context: Context) {
         aptArchives.mkdirs()
         File(aptArchives, "partial").mkdirs()
         val localAptOptions = listOf(
+            "Dir::Cache=" + File(prefix, "var/cache/apt").absolutePath,
             "Dir::Cache::archives=" + aptArchives.absolutePath,
             "Dir::Cache::pkgcache=" + File(prefix, "var/cache/apt/pkgcache.bin").absolutePath,
             "Dir::Cache::srcpkgcache=" + File(prefix, "var/cache/apt/srcpkgcache.bin").absolutePath,
+            "Dir::State=" + File(prefix, "var/lib/apt").absolutePath,
             "Dir::State::status=" + File(prefix, "var/lib/dpkg/status").absolutePath,
             "Dir::State::lists=" + File(prefix, "var/lib/apt/lists").absolutePath,
+            "Dir::Etc=" + File(prefix, "etc/apt").absolutePath,
             "Dir::Etc::sourcelist=" + File(prefix, "etc/apt/sources.list").absolutePath,
             "Dir::Etc::sourceparts=" + File(prefix, "etc/apt/sources.list.d").absolutePath,
-            "Dir::Etc::main=" + File(prefix, "etc/apt/apt.conf").absolutePath,
-            "Dir::Log=" + File(prefix, "var/log/apt").absolutePath
+            "Dir::Etc::Parts=" + File(prefix, "etc/apt/apt.conf.d").absolutePath,
+            "Dir::Etc::Main=" + File(prefix, "etc/apt/apt.conf").absolutePath,
+            "Dir::Bin::dpkg=" + File(prefix, "bin/dpkg").absolutePath,
+            "Dir::Bin::Methods=" + File(prefix, "lib/apt/methods").absolutePath,
+            "Dir::Log=" + File(prefix, "var/log/apt").absolutePath,
+            "DPkg::Options::=--force-bad-path"
         ).joinToString(" ") { "-o " + shellQuote(it) }
+        File(prefix, "etc/apt/apt.conf.d").mkdirs()
+        File(prefix, "etc/apt/sources.list.d").mkdirs()
         File(prefix, "var/cache/apt").mkdirs()
         File(prefix, "var/lib/apt/lists/partial").mkdirs()
         File(prefix, "var/log/apt").mkdirs()
+        File(prefix, "lib/apt/methods").mkdirs()
         val command = "export DEBIAN_FRONTEND=noninteractive; apt-get " + localAptOptions + " " + arguments
         try {
             runShell(command, home, log)
