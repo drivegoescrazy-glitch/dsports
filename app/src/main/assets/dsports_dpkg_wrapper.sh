@@ -89,7 +89,7 @@ for arg in "$@"; do
         if [ "$rewritten" != "$arg" ]; then
             # The function runs in command substitution, so cleanup bookkeeping
             # must be added in this parent shell rather than inside the function.
-            cleanup_dirs+=("$("$PREFIX/bin/dirname" "$rewritten")")
+            cleanup_dirs+=("${rewritten%/*}")
         fi
         new_args+=("$rewritten")
     else
