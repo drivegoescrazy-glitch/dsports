@@ -17,6 +17,8 @@ def fail(message: str) -> None:
 gradle = (ROOT / "app/build.gradle.kts").read_text(encoding="utf-8")
 kotlin = (ROOT / "app/src/main/java/com/dsports/library/EmbeddedToolchain.kt").read_text(encoding="utf-8")
 builder = (ROOT / "app/src/main/assets/dsports_embedded_builder.py").read_text(encoding="utf-8")
+dpkg_wrapper = (ROOT / "app/src/main/assets/dsports_dpkg_wrapper.sh").read_text(encoding="utf-8")
+alternatives_wrapper = (ROOT / "app/src/main/assets/dsports_update_alternatives_wrapper.sh").read_text(encoding="utf-8")
 manifest = (ROOT / "app/src/main/AndroidManifest.xml").read_text(encoding="utf-8")
 
 match = re.search(r'applicationId\s*=\s*"([^"]+)"', gradle)
@@ -57,6 +59,23 @@ for required in (
         fail(f"runtime is missing required path/cache recovery logic: {required}")
 if 'recentOutput.joinToString("\\\\n")' in kotlin:
     fail("diagnostics still encode literal backslash-n instead of actual line breaks")
+if 'ProcessBuilder(linker, shell.absolutePath, "-lc", command)' in kotlin:
+    fail("embedded shell still starts login mode and can read stock Termux profile paths")
+if "sample.any { it == 0.toByte() }" not in kotlin:
+    fail("runtime relocation must skip binary files containing NUL bytes")
+if "ensureDpkgWrapper(log)" not in kotlin or "ensureUpdateAlternativesWrapper(log)" not in kotlin:
+    fail("dpkg and update-alternatives wrappers are not enabled")
+for required in (
+    "--raw-extract",
+    "--build",
+    "data/data/$OLD_PACKAGE",
+    "DEBIAN/*.postinst",
+    "grep" + '" -Iq',
+    's|@@OLD_ROOT@@|@@NEW_ROOT@@|g',
+):
+    # The Kotlin template uses these markers; the shell asset is checked below.
+    if required in kotlin:
+        continue
 
 expected_prefix = new_root + "/files/usr"
 fallback_match = re.search(r'prefix = os\.environ\.get\("PREFIX", "([^"]+)"\)', builder)
@@ -125,6 +144,27 @@ for required in (
 ):
     if required not in builder:
         fail(f"embedded builder is missing its native-ARM64 NDK toolchain patch: {required}")
+
+for required in (
+    "@@PREFIX@@/bin/dpkg-deb",
+    "--raw-extract",
+    "--build",
+    "data/data/$OLD_PACKAGE",
+    "DEBIAN/*.postinst",
+    "grep",
+    "sed",
+):
+    if required not in dpkg_wrapper:
+        fail(f"dpkg wrapper is missing required archive rewriting logic: {required}")
+if "@@NEW_ROOT@@" not in dpkg_wrapper or "@@PACKAGE_NAME@@" not in dpkg_wrapper:
+    fail("dpkg wrapper package-root placeholders are missing")
+for required in ("--altdir", "--admindir", "--log", "update-alternatives.real"):
+    if required not in alternatives_wrapper:
+        fail(f"update-alternatives wrapper is missing private state override: {required}")
+if "ensureDpkgWrapper(log)" not in kotlin or "ensureUpdateAlternativesWrapper(log)" not in kotlin:
+    fail("runtime does not install both package compatibility wrappers")
+if "OLD_PACKAGE_NAME.toByteArray(Charsets.UTF_8) to context.packageName.toByteArray(Charsets.UTF_8)" not in kotlin:
+    fail("runtime is missing same-length package-name relocation")
 
 if "com.termux.RUN_COMMAND" in manifest or "com.termux.permission.RUN_COMMAND" in manifest:
     fail("manifest still declares an external Termux command dependency")
