@@ -13,11 +13,14 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER_TEMPLATE = ROOT / "app/src/main/assets/dsports_dpkg_wrapper.sh"
 GRADLE_CONFIG = (ROOT / "app/build.gradle.kts").read_text(encoding="utf-8")
-PACKAGE_MATCH = re.search(r'applicationId\s*=\s*"([^"]+)"', GRADLE_CONFIG)
-if not PACKAGE_MATCH:
+PACKAGE_LINE = next(
+    (line for line in GRADLE_CONFIG.splitlines() if line.strip().startswith("applicationId")),
+    None,
+)
+if PACKAGE_LINE is None or "=" not in PACKAGE_LINE:
     raise RuntimeError("Could not derive the DSports applicationId for the wrapper test.")
 OLD_ROOT = "/data/data/com.termux"
-NEW_PACKAGE = PACKAGE_MATCH.group(1)
+NEW_PACKAGE = PACKAGE_LINE.split("=", 1)[1].strip().strip('"')
 NEW_ROOT = "/data/data/" + NEW_PACKAGE
 if len(OLD_ROOT) != len(NEW_ROOT):
     raise RuntimeError("The DSports package root must match the upstream Termux root length.")
