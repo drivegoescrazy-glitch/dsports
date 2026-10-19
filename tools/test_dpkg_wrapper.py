@@ -133,12 +133,12 @@ def main() -> None:
             raise RuntimeError("The wrapper did not pass a rewritten .deb to dpkg.real.")
 
         listing = run(dpkg_deb, "--contents", str(captured_deb)).stdout
-        if "data/data/com.dsprtl/files/usr/share/dsports-test/paths.txt" not in listing:
+        if "data/data/" + NEW_PACKAGE + "/files/usr/share/dsports-test/paths.txt" not in listing:
             raise RuntimeError("The rewritten .deb still has the stock Termux data path.")
 
         extracted = base / "extracted"
         run(dpkg_deb, "--extract", str(captured_deb), str(extracted))
-        config = extracted / "data/data/com.dsprtl/files/usr/share/dsports-test/paths.txt"
+        config = extracted / "data" / "data" / NEW_PACKAGE / "files" / "usr" / "share" / "dsports-test" / "paths.txt"
         data_text = config.read_text(encoding="utf-8")
         if OLD_ROOT in data_text or "com.termux" in data_text:
             raise RuntimeError("The rewritten .deb still contains the stock package root in a text file.")
