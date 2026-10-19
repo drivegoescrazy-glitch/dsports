@@ -344,7 +344,7 @@ class EmbeddedToolchain(private val context: Context) {
             "@@NEW_ROOT@@" to newAppRoot,
             "@@PACKAGE_NAME@@" to context.packageName
         )
-        val template = assets.open("dsports_dpkg_wrapper.sh").use { it.readBytes().toString(Charsets.UTF_8) }
+        val template = context.assets.open("dsports_dpkg_wrapper.sh").use { it.readBytes().toString(Charsets.UTF_8) }
         var script = template
         for ((key, value) in replacements) script = script.replace(key, value)
         dpkgFile.writeText(script)
@@ -378,7 +378,7 @@ class EmbeddedToolchain(private val context: Context) {
         }
         if (!real.isFile) return
 
-        val template = assets.open("dsports_update_alternatives_wrapper.sh").use { it.readBytes().toString(Charsets.UTF_8) }
+        val template = context.assets.open("dsports_update_alternatives_wrapper.sh").use { it.readBytes().toString(Charsets.UTF_8) }
         val script = template.replace("@@PREFIX@@", prefix.absolutePath)
         command.writeText(script)
         Os.chmod(command.absolutePath, 0x1C0)
