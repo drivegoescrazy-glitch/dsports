@@ -35,7 +35,7 @@ if 'private const val OLD_APP_ROOT = "/data/data/com.termux"' not in kotlin:
 if 'private const val OLD_PACKAGE_NAME = "com.termux"' not in kotlin:
     fail("embedded runtime must define the stock package-name relocation source")
 if "OLD_PACKAGE_NAME.toByteArray(Charsets.UTF_8) to context.packageName.toByteArray(Charsets.UTF_8)" not in kotlin:
-    fail("embedded runtime must relocate bare package-name strings inside binaries")
+    fail("embedded runtime must relocate package-name strings in text files")
 if "Files.readSymbolicLink(file).toString()" not in kotlin or "Os.symlink(fixedTarget, file.toAbsolutePath().toString())" not in kotlin:
     fail("existing absolute symlink targets must also be relocated during migration")
 if "RandomAccessFile(path.toFile(), \"rw\")" not in kotlin:
@@ -65,18 +65,6 @@ if "sample.any { it == 0.toByte() }" not in kotlin:
     fail("runtime relocation must skip binary files containing NUL bytes")
 if "ensureDpkgWrapper(log)" not in kotlin or "ensureUpdateAlternativesWrapper(log)" not in kotlin:
     fail("dpkg and update-alternatives wrappers are not enabled")
-for required in (
-    "--raw-extract",
-    "--build",
-    "data/data/$OLD_PACKAGE",
-    "DEBIAN/*.postinst",
-    "grep" + '" -Iq',
-    's|@@OLD_ROOT@@|@@NEW_ROOT@@|g',
-):
-    # The Kotlin template uses these markers; the shell asset is checked below.
-    if required in kotlin:
-        continue
-
 expected_prefix = new_root + "/files/usr"
 fallback_match = re.search(r'prefix = os\.environ\.get\("PREFIX", "([^"]+)"\)', builder)
 if not fallback_match:
