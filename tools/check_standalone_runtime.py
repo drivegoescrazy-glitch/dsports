@@ -84,13 +84,13 @@ with tempfile.TemporaryDirectory() as temp_dir:
     toolchain = Path(temp_dir) / "build/cmake/android-legacy.toolchain.cmake"
     toolchain.parent.mkdir(parents=True)
     toolchain.write_text(
-        'set(ANDROID_C_COMPILER\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
-        'set(ANDROID_CXX_COMPILER\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang++\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
-        'set(ANDROID_ASM_COMPILER\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
-        'set(ANDROID_AR\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-ar\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
-        'set(ANDROID_RANLIB\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-ranlib\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
-        'set(ANDROID_STRIP\\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-strip\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\\n'
-        'set(CMAKE_SYSROOT "/test/ndk/sysroot")\\n',
+        'set(ANDROID_C_COMPILER\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
+        'set(ANDROID_CXX_COMPILER\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang++\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
+        'set(ANDROID_ASM_COMPILER\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/clang\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
+        'set(ANDROID_AR\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-ar\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
+        'set(ANDROID_RANLIB\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-ranlib\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
+        'set(ANDROID_STRIP\n  "\\u0024{ANDROID_TOOLCHAIN_ROOT}/bin/llvm-strip\\u0024{ANDROID_TOOLCHAIN_SUFFIX}")\n'
+        'set(CMAKE_SYSROOT "/test/ndk/sysroot")\n',
         encoding="utf-8",
     )
     messages = []
