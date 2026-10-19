@@ -35,7 +35,7 @@ class MainActivity : Activity() {
     private lateinit var smoothButton: Button
     private lateinit var widescreenButton: Button
     private lateinit var game: SupportedGame
-    private lateinit var display: PortDisplay
+    private lateinit var portDisplay: PortDisplay
     private var selectedRomUri: Uri? = null
     private var builtApkUri: Uri? = null
     @Volatile private var buildRunning = false
@@ -63,7 +63,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         game = GameCatalog.byId(intent?.getStringExtra(GameCatalog.EXTRA_GAME_ID))
-        display = PortDisplay.load(this)
+        portDisplay = PortDisplay.load(this)
         window.decorView.systemUiVisibility = (
             View.SYSTEM_UI_FLAG_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
@@ -142,8 +142,8 @@ class MainActivity : Activity() {
         smoothButton = Button(this).apply {
             textSize = 12f
             setOnClickListener {
-                display = display.copy(smoothScaling = !display.smoothScaling)
-                PortDisplay.save(this@MainActivity, display)
+                portDisplay = portDisplay.copy(smoothScaling = !portDisplay.smoothScaling)
+                PortDisplay.save(this@MainActivity, portDisplay)
                 refreshDisplayButtons()
             }
         }
@@ -151,8 +151,8 @@ class MainActivity : Activity() {
         widescreenButton = Button(this).apply {
             textSize = 12f
             setOnClickListener {
-                display = display.copy(widescreenWorld = !display.widescreenWorld)
-                PortDisplay.save(this@MainActivity, display)
+                portDisplay = portDisplay.copy(widescreenWorld = !portDisplay.widescreenWorld)
+                PortDisplay.save(this@MainActivity, portDisplay)
                 refreshDisplayButtons()
             }
         }
@@ -211,24 +211,24 @@ class MainActivity : Activity() {
     }
 
     private fun refreshDisplayButtons() {
-        layoutButton.text = "Screen · " + display.layout.label
-        layoutButton.contentDescription = display.layout.description
-        resolutionButton.text = "World detail · " + display.resolution.label
-        smoothButton.text = "Smooth scaling · " + if (display.smoothScaling) "on" else "off"
-        widescreenButton.text = "Widescreen world · " + if (display.widescreenWorld) "on" else "off"
+        layoutButton.text = "Screen · " + portDisplay.layout.label
+        layoutButton.contentDescription = portDisplay.layout.description
+        resolutionButton.text = "World detail · " + portDisplay.resolution.label
+        smoothButton.text = "Smooth scaling · " + if (portDisplay.smoothScaling) "on" else "off"
+        widescreenButton.text = "Widescreen world · " + if (portDisplay.widescreenWorld) "on" else "off"
     }
 
     private fun cycleLayout() {
-        val next = (display.layout.ordinal + 1) % PortLayout.entries.size
-        display = display.copy(layout = PortLayout.entries[next])
-        PortDisplay.save(this, display)
+        val next = (portDisplay.layout.ordinal + 1) % PortLayout.entries.size
+        portDisplay = portDisplay.copy(layout = PortLayout.entries[next])
+        PortDisplay.save(this, portDisplay)
         refreshDisplayButtons()
     }
 
     private fun cycleResolution() {
-        val next = (display.resolution.ordinal + 1) % PortResolution.entries.size
-        display = display.copy(resolution = PortResolution.entries[next])
-        PortDisplay.save(this, display)
+        val next = (portDisplay.resolution.ordinal + 1) % PortResolution.entries.size
+        portDisplay = portDisplay.copy(resolution = PortResolution.entries[next])
+        PortDisplay.save(this, portDisplay)
         refreshDisplayButtons()
     }
 
@@ -310,7 +310,7 @@ class MainActivity : Activity() {
                 outputApk.delete()
                 processLog.delete()
                 writeStatus("Standalone compiler is ready. Generating native C++ and building the Android game APK…")
-                val displayArguments = display.toBuilderArguments().joinToString(" ") { escapeForShell(it) }
+                val displayArguments = portDisplay.toBuilderArguments().joinToString(" ") { escapeForShell(it) }
                 val cmd = "exec python " + escapeForShell(script.absolutePath) +
                     " --rom " + escapeForShell(stagedRom.absolutePath) +
                     " --status " + escapeForShell(statusFile.absolutePath) +
