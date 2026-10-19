@@ -176,13 +176,29 @@ def patch_ndk_toolchain(ndk_dir, log_fn=None, prefix=None):
         for variable, executable in tools.items():
             replacement = ['set(' + variable + ' "$ENV{PREFIX}/bin/' + executable + '")']
             changed |= _replace_assignment(lines, variable, replacement)
-        # `-static-libstdc++` is a GCC flag: clang rejects it and the link fails.
-        # Android's clang already links the NDK's libc++_static.a by default.
+        # The NDK's CMake toolchain uses the "-static-libstdc++" option to select
+        # libc++_static when building with clang. Restore it for runtimes patched by
+        # older DSports versions, before the toolchain converts its linker flags.
         joined = "\n".join(lines) + "\n"
-        if "-static-libstdc++" in joined:
-            joined = joined.replace("  list(APPEND ANDROID_LINKER_FLAGS \"-static-libstdc++\")", "")
-            joined = joined.replace('list(APPEND ANDROID_LINKER_FLAGS "-static-libstdc++")', "")
+        # The current NDK's android.toolchain.cmake delegates to
+        # android-legacy.toolchain.cmake and has no legacy linker-flag list of its
+        # own. Only restore the option in the file that actually owns that list.
+        if "-static-libstdc++" not in joined and "ANDROID_LINKER_FLAGS" in joined:
+            anchor = 'string(REPLACE ";" " " ANDROID_LINKER_FLAGS'
+            insert_at = joined.find(anchor)
+            if insert_at < 0:
+                raise RuntimeError(
+                    "Could not restore the NDK's static libc++ linker option in " + str(path) + "."
+                )
+            joined = (
+                joined[:insert_at]
+                + 'if(ANDROID_STL STREQUAL c++_static)\n'
+                + '  list(APPEND ANDROID_LINKER_FLAGS "-static-libstdc++")\n'
+                + 'endif()\n'
+                + joined[insert_at:]
+            )
             changed = True
+
         if changed:
             path.write_text(joined, encoding="utf-8")
             patched.append(str(path))

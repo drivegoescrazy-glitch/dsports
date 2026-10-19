@@ -102,8 +102,8 @@ for required in (
 ):
     if required not in builder:
         fail(f"builder is missing required on-device build logic: {required}")
-if "-static-libstdc++" not in builder:
-    fail("builder must strip the unsupported GCC-only -static-libstdc++ flag")
+if '"-static-libstdc++"' not in builder:
+    fail("builder must restore the NDK static libc++ linker option when repairing cached toolchains")
 if "--no-widescreen" not in builder or "--layout" not in builder or "--resolution" not in builder:
     fail("builder does not accept the display options DSports passes it")
 

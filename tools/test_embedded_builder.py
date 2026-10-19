@@ -48,6 +48,7 @@ set(ANDROID_STRIP
 if(ANDROID_STL STREQUAL c++_static)
   list(APPEND ANDROID_LINKER_FLAGS "-static-libstdc++")
 endif()
+string(REPLACE ";" " " ANDROID_LINKER_FLAGS "${ANDROID_LINKER_FLAGS}")
 set(CMAKE_SYSROOT "${ANDROID_TOOLCHAIN_ROOT}/sysroot")
 '''
 
@@ -98,10 +99,21 @@ def test_toolchain_patch(builder):
                 fail("toolchain patch did not persist: " + expected)
         if "CMAKE_SYSROOT" not in text or "${ANDROID_TOOLCHAIN_ROOT}/sysroot" not in text:
             fail("toolchain patch removed the NDK target sysroot")
-        if "-static-libstdc++" in text:
-            fail("toolchain patch left the unsupported -static-libstdc++ link flag")
+        if "-static-libstdc++" not in text:
+            fail("toolchain patch did not restore the NDK's required static libc++ link flag")
         if "${ANDROID_TOOLCHAIN_ROOT}/bin/clang" in text:
             fail("toolchain patch left the x86_64 NDK compiler selected")
+
+        # An older DSports release removed this flag. Repair such cached NDKs too.
+        modern = base / "android.toolchain.cmake"
+        modern.write_text('include("${CMAKE_CURRENT_LIST_DIR}/android-legacy.toolchain.cmake")\n', encoding="utf-8")
+        legacy.write_text(legacy.read_text(encoding="utf-8").replace(
+            '  list(APPEND ANDROID_LINKER_FLAGS "-static-libstdc++")', ""
+        ), encoding="utf-8")
+        restored = builder.patch_ndk_toolchain(ndk, lambda _line: None, prefix=str(prefix))
+        repaired_text = legacy.read_text(encoding="utf-8")
+        if not restored or "-static-libstdc++" not in repaired_text:
+            fail("toolchain patch did not repair a previously stripped C++ runtime link flag")
 
         # A second pass must be a no-op, not a rewrite of already patched text.
         again = builder.patch_ndk_toolchain(ndk, lambda _line: None, prefix=str(prefix))

@@ -18,7 +18,7 @@ On the first build DSports downloads a SHA-256-pinned ARM64 bootstrap environmen
 Before compiling, DSports:
 
 - rewrites Termux `.deb` data paths and maintainer scripts for its own sandbox and keeps binary executables untouched;
-- points the NDK toolchain at the device's own ARM64 compiler, assembler, archiver and strip tools, dropping the GCC-only `-static-libstdc++` link flag that clang rejects;
+- points the NDK toolchain at the device's own ARM64 compiler, assembler, archiver and strip tools, preserving `-static-libstdc++`, the NDK's supported Clang option for statically linking libc++;
 - compiles and links a tiny C and C++ shared library first, so a broken sysroot or compiler fails in seconds instead of after a long compile;
 - verifies the finished APK (archive integrity, `libmain.so`, `libSDL2.so`, the game asset and the APK Signature Scheme v2 block) before reporting success.
 

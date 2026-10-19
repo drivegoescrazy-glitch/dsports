@@ -11,7 +11,7 @@ The APK is produced from the user's own dump. Nothing of the game is downloaded,
 | Concern | DSports behaviour |
 | --- | --- |
 | Host compilers | The downloaded NDK is a Linux/x86_64 bundle whose host binaries cannot run on Android. DSports rewrites `ANDROID_C_COMPILER`, `ANDROID_CXX_COMPILER`, `ANDROID_ASM_COMPILER`, `ANDROID_AR`, `ANDROID_RANLIB` and `ANDROID_STRIP` to the embedded ARM64 tools and keeps the NDK's headers, crt objects and per-ABI libraries. |
-| Link flags | The NDK's `c++_static` path adds `-static-libstdc++`, which is a GCC flag that clang rejects. DSports removes it; clang already links the NDK's `libc++_static.a` for an Android target. |
+| Link flags | The NDK's CMake toolchain adds `-static-libstdc++` to select its `libc++_static.a` runtime with Clang. DSports preserves this required flag; without it the APK would depend on an unbundled `libc++_shared.so`. |
 | Package lookup | SDL2 is built outside the NDK, so package lookup is widened with `CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH` instead of being restricted to the NDK. |
 | Fail fast | Before configuring anything, DSports compiles and links a C and a C++ shared library for `aarch64-linux-android24` and checks that the result is an ARM64 ELF. A missing sysroot, crt object or C++ standard library now fails in seconds with the compiler's own message. |
 | Display defaults | The chosen layout, world detail, smooth scaling, widescreen and fullscreen settings are patched into the frontend's `Settings` struct. Each pattern must match exactly once, so an upstream layout change fails the build instead of silently shipping the wrong defaults. |
