@@ -19,8 +19,8 @@ import java.util.Locale
 
 /**
  * Private in-app build environment. It downloads a checksum-pinned official bootstrap,
- * relocates the compiled prefix to DSports' private directory, and launches bundled
- * tools through Android's system linker. The Termux app itself is never used.
+ * relocates text configuration, wraps dpkg to rewrite package archives locally, and
+ * launches the embedded toolchain without requiring the separate Termux app.
  */
 class EmbeddedToolchain(private val context: Context) {
     companion object {
@@ -33,8 +33,8 @@ class EmbeddedToolchain(private val context: Context) {
         private const val OLD_PREFIX = "$OLD_APP_ROOT/files/usr"
     }
 
-    // The stock Termux root and DSports root must have equal length because
-    // relocation replaces path strings inside already-compiled binaries.
+    // Keep the app-root and package-name lengths identical so paths in text files
+    // and package archives can be relocated without changing offsets.
     private val appRoot = File("/data/data/${context.packageName}")
     private val appFiles = File(appRoot, "files")
     val prefix = File(appFiles, "usr")
@@ -386,9 +386,8 @@ class EmbeddedToolchain(private val context: Context) {
     }
 
     private fun runAptCommand(arguments: String, log: (String) -> Unit) {
-        // Stock Termux apt normally stores downloaded archives under
-        // /data/data/com.termux/cache. Pin its archive cache to DSports' own
-        // private Android cache directory, including apt's required partial dir.
+        // Explicitly bind apt's caches, status database, lists, config and logs to
+        // the DSports prefix; never let a compiled-in Termux path escape the sandbox.
         aptArchives.mkdirs()
         File(aptArchives, "partial").mkdirs()
         val localAptOptions = listOf(
