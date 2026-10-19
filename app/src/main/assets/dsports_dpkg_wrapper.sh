@@ -46,9 +46,11 @@ rewrite_package() {
     # shared libraries, or other binary payloads.
     while IFS= read -r -d '' file; do
         if "$PREFIX/bin/grep" -Iq 'com[.]termux' "$file" 2>/dev/null; then
+            # Escape periods explicitly; in a sed expression, the unescaped dot
+            # in "com.termux" would otherwise match any character.
             "$PREFIX/bin/sed" -i \
-                -e "s|$OLD_ROOT|$NEW_ROOT|g" \
-                -e "s|$OLD_PACKAGE|$NEW_PACKAGE|g" "$file" 2>/dev/null
+                -e "s|/data/data/com[.]termux|$NEW_ROOT|g" \
+                -e "s|com[.]termux|$NEW_PACKAGE|g" "$file" 2>/dev/null
         fi
     done < <("$PREFIX/bin/find" "$root" -type f -print0 2>/dev/null)
 
@@ -70,7 +72,6 @@ rewrite_package() {
 
     rewritten="$work_dir/rewritten.deb"
     if "$DPKG_DEB" -Zgzip -z1 --build "$root" "$rewritten" >/dev/null 2>&1; then
-        cleanup_dirs+=("$work_dir")
         echo "[DSports dpkg] Repacked $(basename "$source_deb") for the local app root." >&2
         echo "$rewritten"
     else
@@ -85,6 +86,11 @@ rewrite_package() {
 for arg in "$@"; do
     if [[ "$arg" == *.deb && -f "$arg" ]]; then
         rewritten="$(rewrite_package "$arg")"
+        if [ "$rewritten" != "$arg" ]; then
+            # The function runs in command substitution, so cleanup bookkeeping
+            # must be added in this parent shell rather than inside the function.
+            cleanup_dirs+=("$("$PREFIX/bin/dirname" "$rewritten")")
+        fi
         new_args+=("$rewritten")
     else
         new_args+=("$arg")
