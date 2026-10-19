@@ -134,7 +134,7 @@ for required in (
         fail(f"embedded builder is missing its native-ARM64 NDK toolchain patch: {required}")
 
 for required in (
-    "@@PREFIX@@/bin/dpkg-deb",
+    "\u0024PREFIX/bin/dpkg-deb",
     "--raw-extract",
     "--build",
     "data/data/$OLD_PACKAGE",
