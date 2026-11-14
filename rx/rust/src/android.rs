@@ -26,7 +26,7 @@ const RENDER_MAX_W: u32 = 1280;
 
 struct Engine {
     state: State,
-    images: Images,
+    images: Arc<Images>,
     dirty: bool,
     width: u32,
     height: u32,
@@ -43,7 +43,7 @@ fn engine() -> &'static Arc<(Mutex<Engine>, Condvar)> {
         Arc::new((
             Mutex::new(Engine {
                 state: State::new(Vec::new()),
-                images: Images::new(),
+                images: Arc::new(Images::new()),
                 dirty: true,
                 width: 1920,
                 height: 1080,
@@ -141,7 +141,7 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeCreate(
 
                 let arc = engine();
                 let mut e = lock_engine(&arc);
-                e.images = images;
+                e.images = Arc::new(images);
                 e.state.replace_apps(apps);
                 e.state.status = status;
                 e.state.dual = load_dual(&dir) || e.state.dual;
@@ -346,7 +346,7 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_onImagePicked(
     let premultiplied = pixmap.data().to_vec();
     let arc = engine();
     let mut e = lock_engine(&arc);
-    let id = e.images.push(pixmap);
+    let id = std::sync::Arc::make_mut(&mut e.images).push(pixmap);
     let selected = e.state.selected;
     let dir = e.files_dir.clone();
     if let Some(app) = e.state.apps.get_mut(selected) {
@@ -422,7 +422,11 @@ fn render_loop(window: NativeWindow) {
     let Some(mut drawer) = (unsafe { build_gl(gl) }) else { return };
 
     let arc = engine();
+    let mut backdrop = crate::Backdrop::new();
     let mut last_frame = std::time::Instant::now();
+    // Adaptive raster scale: slow hardware drops internal resolution (the GPU
+    // upscales the texture) to hold frame rate; fast hardware stays at 1.0.
+    let mut quality: f32 = 1.0;
     loop {
         if STOP.load(Ordering::SeqCst) {
             break;
@@ -433,7 +437,9 @@ fn render_loop(window: NativeWindow) {
         if since < Duration::from_millis(12) {
             thread::sleep(Duration::from_millis(12) - since);
         }
-        let frame = {
+        // Only layout happens under the engine lock, so a touch never waits for
+        // a frame to finish painting. Painting uses the snapshot it was given.
+        let (plan, surf_w, surf_h) = {
             let mut guard = lock_engine(&arc);
             while !guard.dirty && !STOP.load(Ordering::SeqCst) {
                 let (next, _) = arc
@@ -446,29 +452,39 @@ fn render_loop(window: NativeWindow) {
                 break;
             }
             guard.dirty = false;
-            // tiny-skia is a CPU rasteriser: a full-resolution 1080p+ frame costs
-            // several milliseconds per touch event. Rasterising at most 1280 px
-            // wide and letting the GPU upscale the texture keeps sliding smooth,
-            // and 1280x720 is exactly the resolution CardsNX itself lays out in.
-            if guard.state.tick(12.0) {
+            let animating = guard.state.tick(12.0);
+            if animating {
                 guard.dirty = true;
             }
-            let w = guard.width;
-            let h = guard.height;
-            let (rw, rh) = if w > RENDER_MAX_W {
-                let scale = RENDER_MAX_W as f32 / w as f32;
-                (RENDER_MAX_W, ((h as f32) * scale).round().max(1.0) as u32)
-            } else {
-                (w, h)
-            };
-            crate::render(&guard.state, rw, rh, &guard.images)
+            let w = guard.width.max(1);
+            let h = guard.height.max(1);
+            // 1280 px wide is CardsNX's own layout resolution; while the row is
+            // easing, a slightly smaller raster keeps the motion fluid.
+            let cap = RENDER_MAX_W.min(w);
+            let scale = if animating { 0.72 * quality } else { 1.0 };
+            let rw = ((cap as f32 * scale) as u32).max(320);
+            let rh = ((rw as f32 * h as f32 / w as f32).round() as u32).max(180);
+            (
+                crate::plan(&guard.state, rw, rh, guard.images.clone()),
+                w,
+                h,
+            )
         };
+        let paint_started = std::time::Instant::now();
+        let frame = crate::paint_plan(&plan, &mut backdrop);
         if let Some(pixmap) = frame {
             // The shader's full-screen quad covers the surface, so a smaller
             // pixmap simply scales up to the window.
-            unsafe { drawer.draw(&pixmap) };
+            unsafe { drawer.draw(&pixmap, surf_w, surf_h) };
             let _ = instance.swap_buffers(display, surface);
             last_frame = std::time::Instant::now();
+            // Aim at a ~20 ms frame budget while the row is moving.
+            let spent = paint_started.elapsed().as_secs_f32() * 1000.0;
+            if spent > 26.0 {
+                quality = (quality * 0.88).max(0.5);
+            } else if spent < 12.0 {
+                quality = (quality * 1.04).min(1.0);
+            }
         }
     }
 
@@ -550,10 +566,13 @@ unsafe fn build_gl(gl: glow::Context) -> Option<Drawer> {
 }
 
 impl Drawer {
-    unsafe fn draw(&mut self, pixmap: &tiny_skia::Pixmap) {
+    unsafe fn draw(&mut self, pixmap: &tiny_skia::Pixmap, surface_w: u32, surface_h: u32) {
         use glow::HasContext;
         let gl = &self.gl;
-        gl.viewport(0, 0, pixmap.width() as i32, pixmap.height() as i32);
+        // The viewport is the window, not the texture: the pixmap may be a
+        // smaller raster that the shader's full-screen quad scales up. Setting
+        // the viewport to the texture size drew the UI into a corner.
+        gl.viewport(0, 0, surface_w as i32, surface_h as i32);
         gl.clear_color(0.0, 0.0, 0.0, 1.0);
         gl.clear(glow::COLOR_BUFFER_BIT);
         gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));

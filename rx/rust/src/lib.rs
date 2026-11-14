@@ -20,7 +20,7 @@ use scene::{Cmd, Images, Painter};
 use tiny_skia::Pixmap;
 use ui::Ctx;
 
-pub const VERSION: &str = "1.0.5";
+pub const VERSION: &str = "1.0.6";
 
 /// Builds the full command list for the current state and viewport.
 pub fn build_cmds(state: &State, width: u32, height: u32) -> Vec<Cmd> {
@@ -43,6 +43,181 @@ pub fn render(state: &State, width: u32, height: u32, images: &Images) -> Option
     let cmds = build_cmds(state, width, height);
     Painter::new(images).paint(&mut pixmap, &cmds);
     Some(pixmap)
+}
+
+/// One app's full-screen artwork, already scaled and washed.
+struct Layer {
+    index: usize,
+    art: scene::ImgId,
+    w: u32,
+    h: u32,
+    pixmap: Pixmap,
+}
+
+/// A backdrop layer request: which app, its artwork and its colour seed.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameArt {
+    pub index: usize,
+    pub art: scene::ImgId,
+    pub seed: u32,
+}
+
+/// Layout produced under the engine lock; everything else happens outside it,
+/// so a touch never waits for a frame to finish painting.
+pub struct FramePlan {
+    pub width: u32,
+    pub height: u32,
+    pub cmds: Vec<Cmd>,
+    pub layers: [Option<FrameArt>; 2],
+    pub frac: f32,
+    pub images: std::sync::Arc<Images>,
+}
+
+/// Caches the backdrop layers. Scrolling then costs a blend of two ready
+/// full-screen images instead of rescaling artwork every frame.
+pub struct Backdrop {
+    layers: Vec<Layer>,
+}
+
+impl Backdrop {
+    pub fn new() -> Self {
+        Backdrop { layers: Vec::new() }
+    }
+
+    fn art_of(state: &State, index: usize) -> scene::ImgId {
+        state
+            .apps
+            .get(index)
+            .map(|a| if a.hero != scene::ImgId::None { a.hero } else { a.boxart })
+            .unwrap_or(scene::ImgId::None)
+    }
+
+    /// Builds the layer for one app if it isn't cached at this size.
+    fn ensure(&mut self, art: FrameArt, w: u32, h: u32, images: &Images) {
+        if self
+            .layers
+            .iter()
+            .any(|l| l.index == art.index && l.art == art.art && l.w == w && l.h == h)
+        {
+            return;
+        }
+        let ctx = Ctx::new(w as f32, h as f32);
+        let mut cmds = Vec::with_capacity(8);
+        home::backdrop(&mut cmds, &ctx, art.art, art.seed);
+        let Some(mut pixmap) = Pixmap::new(w, h) else { return };
+        pixmap.fill(tiny_skia::Color::BLACK);
+        Painter::new(images).paint(&mut pixmap, &cmds);
+        self.layers
+            .retain(|l| !(l.index == art.index && l.w == w && l.h == h));
+        if self.layers.len() >= 4 {
+            self.layers.remove(0);
+        }
+        self.layers.push(Layer {
+            index: art.index,
+            art: art.art,
+            w,
+            h,
+            pixmap,
+        });
+    }
+
+    fn get(&self, index: usize, w: u32, h: u32) -> Option<&Pixmap> {
+        self.layers
+            .iter()
+            .find(|l| l.index == index && l.w == w && l.h == h)
+            .map(|l| &l.pixmap)
+    }
+}
+
+impl Default for Backdrop {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `dst` becomes a cross-fade of itself and `src` at `t`.
+fn blend_pixmaps(dst: &mut Pixmap, src: &Pixmap, t: f32) {
+    let t16 = (t.clamp(0.0, 1.0) * 256.0) as u32;
+    let inv = 256 - t16;
+    let d = dst.data_mut();
+    let s = src.data();
+    for (a, b) in d.iter_mut().zip(s.iter()) {
+        *a = ((*b as u32 * t16 + *a as u32 * inv) >> 8) as u8;
+    }
+}
+
+/// Everything that needs the state lock: layout, layer choice, image handle.
+pub fn plan(state: &State, width: u32, height: u32, images: std::sync::Arc<Images>) -> FramePlan {
+    let ctx = Ctx::new(width as f32, height as f32);
+    let mut cmds = Vec::with_capacity(256);
+    home::build_foreground(&mut cmds, &ctx, state);
+    if state.overlay == model::Overlay::Settings {
+        settings(&mut cmds, &ctx, state);
+    }
+    let visible = state.visible();
+    let mut layers = [None, None];
+    let mut frac = 0.0;
+    if !visible.is_empty() {
+        let focus = state.scroll.clamp(0.0, (visible.len() - 1) as f32);
+        let i0 = focus.floor() as usize;
+        frac = focus - i0 as f32;
+        layers[0] = state.apps.get(visible[i0]).map(|a| FrameArt {
+            index: visible[i0],
+            art: if a.hero != scene::ImgId::None { a.hero } else { a.boxart },
+            seed: a.seed,
+        });
+        if frac > 0.002 {
+            if let Some(next) = visible.get(i0 + 1) {
+                layers[1] = state.apps.get(*next).map(|a| FrameArt {
+                    index: *next,
+                    art: if a.hero != scene::ImgId::None { a.hero } else { a.boxart },
+                    seed: a.seed,
+                });
+            }
+        }
+    }
+    FramePlan {
+        width,
+        height,
+        cmds,
+        layers,
+        frac,
+        images,
+    }
+}
+
+/// Paints a plan outside the state lock, compositing cached backdrop layers.
+pub fn paint_plan(plan: &FramePlan, backdrop: &mut Backdrop) -> Option<Pixmap> {
+    let mut frame = Pixmap::new(plan.width, plan.height)?;
+    frame.fill(tiny_skia::Color::BLACK);
+    if let Some(a) = plan.layers[0] {
+        backdrop.ensure(a, plan.width, plan.height, &plan.images);
+        if let Some(layer) = backdrop.get(a.index, plan.width, plan.height) {
+            frame.data_mut().copy_from_slice(layer.data());
+        }
+        if plan.frac > 0.002 {
+            if let Some(b) = plan.layers[1] {
+                backdrop.ensure(b, plan.width, plan.height, &plan.images);
+                if let Some(layer) = backdrop.get(b.index, plan.width, plan.height) {
+                    blend_pixmaps(&mut frame, layer, plan.frac);
+                }
+            }
+        }
+    }
+    Painter::new(&plan.images).paint(&mut frame, &plan.cmds);
+    Some(frame)
+}
+
+/// Convenience wrapper: plan and paint in one go (preview and tests).
+pub fn render_cached(
+    state: &State,
+    width: u32,
+    height: u32,
+    images: &Images,
+    backdrop: &mut Backdrop,
+) -> Option<Pixmap> {
+    let plan = plan(state, width, height, std::sync::Arc::new(images.clone()));
+    paint_plan(&plan, backdrop)
 }
 
 fn settings(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {

@@ -26,6 +26,16 @@ pub fn hero(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
             }
         }
     }
+    washes(out, ctx);
+}
+
+/// One app's full-screen backdrop: its artwork plus the legibility washes.
+pub fn backdrop(out: &mut Vec<Cmd>, ctx: &Ctx, art: ImgId, seed: u32) {
+    hero_art(out, ctx, art, seed, 1.0);
+    washes(out, ctx);
+}
+
+fn washes(out: &mut Vec<Cmd>, ctx: &Ctx) {
     // Legibility wash: dark at the top bar, clear in the middle, darker at the panel.
     out.push(Cmd::RoundRect {
         rect: rect(0.0, 0.0, ctx.w, ctx.y(210.0)),
@@ -48,8 +58,12 @@ pub fn hero(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
 }
 /// One hero image (or its procedural stand-in) at `alpha`.
 fn hero_layer(out: &mut Vec<Cmd>, ctx: &Ctx, app: &crate::model::AppEntry, alpha: f32) {
+    let art = if app.hero != ImgId::None { app.hero } else { app.boxart };
+    hero_art(out, ctx, art, app.seed, alpha);
+}
+
+fn hero_art(out: &mut Vec<Cmd>, ctx: &Ctx, hero_img: ImgId, seed: u32, alpha: f32) {
     let full = rect(0.0, 0.0, ctx.w, ctx.h);
-    let hero_img = if app.hero != ImgId::None { app.hero } else { app.boxart };
     if hero_img != ImgId::None {
         out.push(Cmd::Image {
             rect: full,
@@ -66,8 +80,8 @@ fn hero_layer(out: &mut Vec<Cmd>, ctx: &Ctx, app: &crate::model::AppEntry, alpha
             rect: full,
             radius: 0.0,
             fill: Some(Fill::Vertical(Gradient {
-                top: fade(ui::hsv(app.seed as f32, 0.55, 0.38), a),
-                bottom: fade(ui::hsv(app.seed as f32 + 40.0, 0.62, 0.12), a),
+                top: fade(ui::hsv(seed as f32, 0.55, 0.38), a),
+                bottom: fade(ui::hsv(seed as f32 + 40.0, 0.62, 0.12), a),
             })),
             stroke: None,
         });
@@ -453,6 +467,18 @@ pub fn panel(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State, top: f32) -> Rect {
         dots(out, ctx, right - 240.0, top + 252.0, visible.len().min(6), active.min(5));
     }
     r
+}
+
+/// Everything except the backdrop, for frames composited over a cached one.
+pub fn build_foreground(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
+    top_bar(out, ctx, state);
+    if state.dual {
+        cards(out, ctx, state, 148.0, 372.0);
+        crate::dual::stack(out, ctx, state, 528.0, 1046.0);
+    } else {
+        cards(out, ctx, state, m::CARD_ROW_TOP, m::CARD_H);
+        panel(out, ctx, state, m::PANEL_TOP);
+    }
 }
 
 /// Whole home screen. `dual` compresses the card row into the top half.
