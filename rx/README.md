@@ -1,4 +1,4 @@
-# NXS Launcher 1.0.2
+# NXS Launcher 1.0.9
 
 A CardsNX-style Android launcher, rewritten in Rust. v1.0.2 replaces the Kotlin
 view stack with a single native renderer: the whole launcher is one

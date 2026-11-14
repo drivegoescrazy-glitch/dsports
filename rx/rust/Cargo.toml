@@ -1,6 +1,6 @@
 [package]
 name = "nxs"
-version = "1.0.2"
+version = "1.0.9"
 edition = "2021"
 description = "NXS Launcher - native Rust port of the CardsNX layout"
 
@@ -36,8 +36,8 @@ glow = "0.14"
 png = "0.17"
 
 [profile.release]
-opt-level = "z"
-lto = true
+opt-level = 3
+lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = true

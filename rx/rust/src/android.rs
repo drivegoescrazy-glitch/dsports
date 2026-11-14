@@ -403,6 +403,8 @@ struct Drawer {
     vbo: glow::Buffer,
     alpha: Option<glow::UniformLocation>,
     textures: std::collections::HashMap<crate::gpu::LayerKey, Tex>,
+    /// Recently used card textures survive brief scrolls instead of being rebuilt.
+    card_lru: std::collections::VecDeque<crate::gpu::LayerKey>,
     verts: Vec<f32>,
 }
 
@@ -538,6 +540,7 @@ fn render_loop(window: NativeWindow) {
         // always at full resolution no matter what the frame is doing.
         let (card_w, card_h) = crate::gpu::card_pixels(&snapshot, sw, sh);
         for quad in &scene.cards {
+            drawer.touch_card(quad.key);
             if drawer.size(quad.key) == Some((card_w, card_h)) {
                 continue;
             }
@@ -552,6 +555,10 @@ fn render_loop(window: NativeWindow) {
                 unsafe { drawer.upload(crate::gpu::LayerKey::Rim, &pixmap) };
             }
         }
+
+        // Rasterise large layers below native resolution on high-density screens.
+        // The GL sampler scales them to the surface; card art remains full resolution.
+        let (layer_w, layer_h) = crate::gpu::layer_pixels(sw, sh);
 
         // Expensive layers (full-screen backdrop, bar + panel) go off-thread.
         let mut want = Vec::with_capacity(3);
@@ -571,7 +578,7 @@ fn render_loop(window: NativeWindow) {
                 chrome_inflight += 1;
             }
             pending.insert(key);
-            let _ = tx.send((key, snapshot.clone(), sw, sh, images.clone()));
+            let _ = tx.send((key, snapshot.clone(), layer_w, layer_h, images.clone()));
         }
 
         let ctx = crate::ui::Ctx::new(sw as f32, sh as f32);
@@ -738,6 +745,7 @@ unsafe fn build_gl(gl: glow::Context) -> Option<Drawer> {
         vbo,
         alpha,
         textures: std::collections::HashMap::new(),
+        card_lru: std::collections::VecDeque::new(),
         verts: vec![0.0; 16],
     })
 }
@@ -756,21 +764,40 @@ impl Drawer {
         for (_, tex) in self.textures.drain() {
             unsafe { self.gl.delete_texture(tex.id) };
         }
+        self.card_lru.clear();
     }
 
-    /// Drops every layer the frame did not need, so browsing a long list does
-    /// not accumulate full-screen textures until the process is out of memory.
+    /// Marks a card as recently used. The small LRU lets neighbouring cards
+    /// stay resident while keeping memory bounded on large app libraries.
+    fn touch_card(&mut self, key: crate::gpu::LayerKey) {
+        if !matches!(key, crate::gpu::LayerKey::Card(_)) {
+            return;
+        }
+        if let Some(position) = self.card_lru.iter().position(|cached| *cached == key) {
+            self.card_lru.remove(position);
+        }
+        self.card_lru.push_back(key);
+    }
+
+    /// Drops unused full-screen layers and caps retained card textures at 24.
     fn retain(&mut self, keep: &[crate::gpu::LayerKey]) {
         use glow::HasContext;
         let stale: Vec<crate::gpu::LayerKey> = self
             .textures
             .keys()
             .copied()
-            .filter(|key| !keep.contains(key))
+            .filter(|key| !keep.contains(key) && !matches!(*key, crate::gpu::LayerKey::Card(_)))
             .collect();
         for key in stale {
             if let Some(tex) = self.textures.remove(&key) {
                 unsafe { self.gl.delete_texture(tex.id) };
+            }
+        }
+        while self.card_lru.len() > 24 {
+            if let Some(key) = self.card_lru.pop_front() {
+                if let Some(tex) = self.textures.remove(&key) {
+                    unsafe { self.gl.delete_texture(tex.id) };
+                }
             }
         }
     }
@@ -852,12 +879,12 @@ impl Drawer {
             let r = (quad.x + quad.w) / sw * 2.0 - 1.0;
             let t = 1.0 - quad.y / sh * 2.0;
             let b = 1.0 - (quad.y + quad.h) / sh * 2.0;
-            self.verts = vec![
+            self.verts.copy_from_slice(&[
                 l, b, 0.0, 1.0, //
                 r, b, 1.0, 1.0, //
                 l, t, 0.0, 0.0, //
                 r, t, 1.0, 0.0,
-            ];
+            ]);
             let bytes = std::slice::from_raw_parts(self.verts.as_ptr() as *const u8, 64);
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);

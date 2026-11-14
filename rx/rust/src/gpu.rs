@@ -42,6 +42,18 @@ pub struct Scene {
     pub chrome: LayerKey,
 }
 
+/// Caps expensive software-rasterised full-screen layers on large displays.
+/// They are linearly upscaled by GL; individual card textures stay native-sized.
+pub fn layer_pixels(w: u32, h: u32) -> (u32, u32) {
+    const MAX_EDGE: f32 = 1600.0;
+    let longest = w.max(h).max(1) as f32;
+    let scale = (MAX_EDGE / longest).min(1.0);
+    (
+        ((w as f32 * scale).round() as u32).max(1),
+        ((h as f32 * scale).round() as u32).max(1),
+    )
+}
+
 pub fn scene(state: &State) -> Scene {
     let visible = state.visible();
     let mut bg = Vec::with_capacity(2);
