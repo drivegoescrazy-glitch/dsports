@@ -292,6 +292,7 @@ pub fn chrome_hash(state: &State) -> u64 {
     state.page.index().hash(&mut hasher);
     (state.sort as u8).hash(&mut hasher);
     state.dual.hash(&mut hasher);
+    state.scroll_speed.to_bits().hash(&mut hasher);
     (state.overlay as u8).hash(&mut hasher);
     state.status.clock.hash(&mut hasher);
     state.status.battery.hash(&mut hasher);
@@ -504,4 +505,18 @@ pub(crate) fn settings(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
         Align::Center,
     );
     let _ = Glyph::Gear;
+}
+
+#[cfg(test)]
+mod chrome_hash_tests {
+    use crate::model::{demo_apps, State};
+
+    #[test]
+    fn settings_speed_change_invalidates_cached_chrome() {
+        let mut state = State::new(demo_apps());
+        let before = super::chrome_hash(&state);
+        state.scroll_speed = 5.0;
+        let after = super::chrome_hash(&state);
+        assert_ne!(before, after);
+    }
 }
