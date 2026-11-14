@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
@@ -59,15 +60,27 @@ class NxsActivity : Activity(), SurfaceHolder.Callback {
     override fun surfaceCreated(holder: SurfaceHolder) {
         val w = Math.max(1, view.width)
         val h = Math.max(1, view.height)
-        nativeCreate(holder.surface, w, h, filesDir.absolutePath, packageName)
+        // A throw from the native side must not take the launcher down: the next
+        // surface event retries, and the reason lands in logcat.
+        guard("create") {
+            nativeCreate(holder.surface, w, h, filesDir.absolutePath, packageName)
+        }
     }
 
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        nativeResize(Math.max(1, width), Math.max(1, height))
+        guard("resize") { nativeResize(Math.max(1, width), Math.max(1, height)) }
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
-        nativeDestroy()
+        guard("destroy") { nativeDestroy() }
+    }
+
+    private inline fun guard(what: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (t: Throwable) {
+            Log.e(TAG, "native $what failed", t)
+        }
     }
 
     // ------------------------------------------------------------------ input
@@ -143,6 +156,7 @@ class NxsActivity : Activity(), SurfaceHolder.Callback {
 
     @Deprecated("Platform callback for the document picker")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        //noinspection deprecation
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != REQUEST_PICK || resultCode != RESULT_OK) {
             pendingPick = 0
@@ -177,6 +191,7 @@ class NxsActivity : Activity(), SurfaceHolder.Callback {
     }
 
     companion object {
+        private const val TAG = "NXS"
         private const val REQUEST_PICK = 4801
 
         init {
