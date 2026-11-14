@@ -6,10 +6,27 @@ use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use std::sync::OnceLock;
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
 
-pub const ANDROID_FONTS: &[(&str, Weight)] = &[
-    ("/system/fonts/Roboto-Regular.ttf", Weight::Regular),
-    ("/system/fonts/Roboto-Medium.ttf", Weight::Medium),
-    ("/system/fonts/Roboto-Bold.ttf", Weight::Bold),
+/// Where the platform keeps its sans face. OEM builds rename or drop Roboto, so
+/// several paths are tried; a device with none of them renders without text
+/// instead of aborting the process.
+const ANDROID_REGULAR: &[&str] = &[
+    "/system/fonts/Roboto-Regular.ttf",
+    "/system/fonts/Roboto.ttf",
+    "/system/fonts/NotoSans-Regular.ttf",
+    "/system/fonts/DroidSans.ttf",
+    "/system/fonts/SamsungOneUI-Regular.ttf",
+];
+
+const ANDROID_MEDIUM: &[&str] = &[
+    "/system/fonts/Roboto-Medium.ttf",
+    "/system/fonts/NotoSans-Medium.ttf",
+    "/system/fonts/SamsungOneUI-Medium.ttf",
+];
+
+const ANDROID_BOLD: &[&str] = &[
+    "/system/fonts/Roboto-Bold.ttf",
+    "/system/fonts/NotoSans-Bold.ttf",
+    "/system/fonts/SamsungOneUI-Bold.ttf",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -41,7 +58,7 @@ impl Weight {
 }
 
 pub struct Fonts {
-    regular: FontVec,
+    regular: Option<FontVec>,
     medium: Option<FontVec>,
     bold: Option<FontVec>,
 }
@@ -63,41 +80,43 @@ impl Fonts {
     pub fn get() -> &'static Fonts {
         FONTS.get_or_init(|| {
             #[cfg(target_os = "android")]
-            let (regular, medium, bold) = {
-                let r = load_first(&["/system/fonts/Roboto-Regular.ttf"])
-                    .expect("Android always ships Roboto-Regular.ttf");
-                let m = load_first(&["/system/fonts/Roboto-Medium.ttf"]);
-                let b = load_first(&["/system/fonts/Roboto-Bold.ttf"]);
-                (r, m, b)
-            };
+            let (regular, medium, bold) = (
+                load_first(ANDROID_REGULAR),
+                load_first(ANDROID_MEDIUM),
+                load_first(ANDROID_BOLD),
+            );
             #[cfg(not(target_os = "android"))]
-            let (regular, medium, bold) = {
-                let r = load_first(Weight::Regular.host_paths()).expect("host font");
-                let m = load_first(Weight::Medium.host_paths());
-                let b = load_first(Weight::Bold.host_paths());
-                (r, m, b)
-            };
-            Fonts { regular, medium, bold }
+            let (regular, medium, bold) = (
+                load_first(Weight::Regular.host_paths()),
+                load_first(Weight::Medium.host_paths()),
+                load_first(Weight::Bold.host_paths()),
+            );
+            Fonts {
+                regular,
+                medium,
+                bold,
+            }
         })
     }
 
-    fn font(&self, weight: Weight) -> &FontVec {
+    fn font(&self, weight: Weight) -> Option<&FontVec> {
         match weight {
-            Weight::Regular => &self.regular,
-            Weight::Medium => self.medium.as_ref().unwrap_or(&self.regular),
+            Weight::Regular => self.regular.as_ref(),
+            Weight::Medium => self.medium.as_ref().or(self.regular.as_ref()),
             Weight::Bold => self
                 .bold
                 .as_ref()
                 .or(self.medium.as_ref())
-                .unwrap_or(&self.regular),
+                .or(self.regular.as_ref()),
         }
     }
 }
 
 /// Horizontal advance of `text`, including kerning.
 pub fn measure(text: &str, size: f32, weight: Weight) -> f32 {
-    let fonts = Fonts::get();
-    let font = fonts.font(weight);
+    let Some(font) = Fonts::get().font(weight) else {
+        return 0.0;
+    };
     let scaled = font.as_scaled(PxScale::from(size));
     let mut width = 0.0;
     let mut prev = None;
@@ -114,9 +133,10 @@ pub fn measure(text: &str, size: f32, weight: Weight) -> f32 {
 
 /// Baseline-relative vertical extent used to centre text in a row.
 pub fn ascent(size: f32, weight: Weight) -> f32 {
-    let fonts = Fonts::get();
-    let scaled = fonts.font(weight).as_scaled(PxScale::from(size));
-    scaled.ascent()
+    let Some(font) = Fonts::get().font(weight) else {
+        return 0.0;
+    };
+    font.as_scaled(PxScale::from(size)).ascent()
 }
 
 fn build_path(
@@ -127,8 +147,7 @@ fn build_path(
     baseline: f32,
     align: Align,
 ) -> Option<tiny_skia::Path> {
-    let fonts = Fonts::get();
-    let font = fonts.font(weight);
+    let font = Fonts::get().font(weight)?;
     let scaled = font.as_scaled(PxScale::from(size));
     let width = measure(text, size, weight);
     let mut pen_x = match align {

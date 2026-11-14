@@ -35,5 +35,9 @@ build_abi aarch64-linux-android arm64-v8a aarch64-linux-android26-clang
 if [[ "${ARMV7:-1}" == "1" ]]; then
   build_abi armv7-linux-androideabi armeabi-v7a armv7a-linux-androideabi26-clang
 fi
+# Emulators and Chromebooks; also what the release is smoke-tested on.
+if [[ "${X86_64:-1}" == "1" ]]; then
+  build_abi x86_64-linux-android x86_64 x86_64-linux-android26-clang
+fi
 
 echo "native libraries staged in app/src/main/jniLibs"

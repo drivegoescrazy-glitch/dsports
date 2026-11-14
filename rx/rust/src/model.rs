@@ -168,6 +168,17 @@ impl State {
         }
     }
 
+    /// Swaps in the app list once discovery finishes on its worker thread.
+    pub fn replace_apps(&mut self, apps: Vec<AppEntry>) {
+        self.apps = apps;
+        if self.apps.is_empty() {
+            self.selected = 0;
+        } else if self.selected >= self.apps.len() {
+            self.selected = self.apps.len() - 1;
+        }
+        self.hit.clear();
+    }
+
     /// Switches page, wrapping around, and focuses its first card.
     pub fn page_shift(&mut self, delta: i32) {
         let pages = Page::ALL;

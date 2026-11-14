@@ -52,12 +52,26 @@ fn engine() -> &'static Arc<(Mutex<Engine>, Condvar)> {
     })
 }
 
+/// A panic while a lock is held poisons the mutex; the launcher must keep
+/// running, so take the data anyway instead of `unwrap()`.
+fn lock_engine(arc: &Arc<(Mutex<Engine>, Condvar)>) -> std::sync::MutexGuard<'_, Engine> {
+    arc.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A failed JNI call leaves a Java exception pending. If it is not cleared,
+/// every later call silently fails and the exception surfaces when the native
+/// method returns, which kills the process. Every boundary clears it.
+fn clear(env: &mut JNIEnv) {
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+}
+
 fn mark_dirty() {
     if let Some(arc) = ENGINE.get() {
-        if let Ok(mut e) = arc.0.lock() {
-            e.dirty = true;
-            arc.1.notify_all();
-        }
+        let mut e = lock_engine(arc);
+        e.dirty = true;
+        arc.1.notify_all();
     }
 }
 
@@ -89,18 +103,40 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeCreate(
 ) {
     let dir: String = env.get_string(&files_dir).map(Into::into).unwrap_or_default();
 
-    {
+    let (vm, activity) = {
         let arc = engine();
-        let mut e = arc.0.lock().unwrap();
+        let mut e = lock_engine(&arc);
         e.activity = env.new_global_ref(&this).ok();
         e.files_dir = dir.clone();
         e.width = width.max(1) as u32;
         e.height = height.max(1) as u32;
-        let apps = platform::load_apps(&mut env, &this, &mut e.images, &dir);
-        e.state = State::new(apps);
-        e.state.dual = load_dual(&dir);
-        platform::load_status(&mut env, &this, &mut e.state.status, &dir);
         e.dirty = true;
+        (env.get_java_vm().ok(), e.activity.clone())
+    };
+    // Nothing from here on may leave an exception pending for the caller.
+    clear(&mut env);
+
+    // Enumerating every installed app and rasterising its icon takes long enough
+    // to trip an ANR when it runs inside surfaceCreated, so discovery gets its own
+    // thread and the first frame is drawn straight away.
+    if let (Some(vm), Some(activity)) = (vm, activity) {
+        let dir = dir.clone();
+        thread::Builder::new()
+            .name("nxs-apps".into())
+            .spawn(move || {
+                let Ok(mut env) = vm.attach_current_thread() else {
+                    return;
+                };
+                let arc = engine();
+                let mut e = lock_engine(&arc);
+                let apps = platform::load_apps(&mut env, activity.as_obj(), &mut e.images, &dir);
+                e.state.replace_apps(apps);
+                e.state.dual = load_dual(&dir) || e.state.dual;
+                platform::load_status(&mut env, activity.as_obj(), &mut e.state.status, &dir);
+                e.dirty = true;
+                arc.1.notify_all();
+            })
+            .ok();
     }
 
     STOP.store(false, Ordering::SeqCst);
@@ -143,7 +179,8 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeResize(
     height: jint,
 ) {
     let arc = engine();
-    if let Ok(mut e) = arc.0.lock() {
+    {
+        let mut e = lock_engine(&arc);
         e.width = width.max(1) as u32;
         e.height = height.max(1) as u32;
         e.dirty = true;
@@ -169,7 +206,7 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeTouch(
 ) {
     let (dx, dy) = {
         let arc = engine();
-        let e = arc.0.lock().unwrap();
+        let e = lock_engine(&arc);
         let ctx = crate::ui::Ctx::new(e.width as f32, e.height as f32);
         ((x - ctx.ox) / ctx.s, (y - ctx.oy) / ctx.s)
     };
@@ -178,7 +215,7 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeTouch(
     let mut persist: Option<bool> = None;
     {
         let arc = engine();
-        let mut e = arc.0.lock().unwrap();
+        let mut e = lock_engine(&arc);
         match action {
             0 => e.state.touch_start(dx, dy, event_time),
             2 => e.state.touch_move(dx, dy, event_time),
@@ -194,7 +231,7 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeTouch(
         arc.1.notify_all();
     }
     if let (Some(dual), arc) = (persist, engine()) {
-        let dir = arc.0.lock().map(|e| e.files_dir.clone()).unwrap_or_default();
+        let dir = lock_engine(&arc).files_dir.clone();
         save_dual(&dir, dual);
     }
 
@@ -230,7 +267,7 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeKey(
         return;
     }
     let arc = engine();
-    let mut e = arc.0.lock().unwrap();
+    let mut e = lock_engine(&arc);
     match code {
         21 => e.state.step(-1),          // DPAD_LEFT
         22 => e.state.step(1),           // DPAD_RIGHT
@@ -247,7 +284,8 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeKey(
 #[no_mangle]
 pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeBack(_env: JNIEnv, _this: JObject) {
     let arc = engine();
-    if let Ok(mut e) = arc.0.lock() {
+    {
+        let mut e = lock_engine(&arc);
         if e.state.overlay != crate::model::Overlay::None {
             e.state.overlay = crate::model::Overlay::None;
         } else if e.state.dual {
@@ -288,8 +326,11 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_onImagePicked(
         px[2] = ((b * a) / 255) as u8;
         px[3] = a as u8;
     }
+    // The stored copy has to be premultiplied like the in-memory pixmap, or a
+    // reloaded image comes back brighter than the one that was just picked.
+    let premultiplied = pixmap.data().to_vec();
     let arc = engine();
-    let Ok(mut e) = arc.0.lock() else { return };
+    let mut e = lock_engine(&arc);
     let id = e.images.push(pixmap);
     let selected = e.state.selected;
     let dir = e.files_dir.clone();
@@ -300,7 +341,7 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_onImagePicked(
             app.hero = id;
         }
         let pkg = app.package.clone();
-        platform::write_media(&dir, &pkg, kind, &bytes, w, h);
+        platform::write_media(&dir, &pkg, kind, &premultiplied, w, h);
     }
     e.dirty = true;
     arc.1.notify_all();
@@ -371,9 +412,12 @@ fn render_loop(window: NativeWindow) {
             break;
         }
         let frame = {
-            let mut guard = arc.0.lock().unwrap();
+            let mut guard = lock_engine(&arc);
             while !guard.dirty && !STOP.load(Ordering::SeqCst) {
-                let (next, _) = arc.1.wait_timeout(guard, Duration::from_secs(30)).unwrap();
+                let (next, _) = arc
+                    .1
+                    .wait_timeout(guard, Duration::from_secs(30))
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 guard = next;
             }
             if STOP.load(Ordering::SeqCst) {
@@ -532,16 +576,59 @@ pub mod platform {
     use super::*;
     use crate::scene::ImgId;
 
+    /// Reads a Java string. App labels arrive as `CharSequence` and are not
+    /// always `java.lang.String` (SpannableString is common), and handing a
+    /// non-String to `get_string` raises a ClassCastException that stays pending
+    /// and eventually kills the process, so it is stringified first.
     fn jstr(env: &mut JNIEnv, obj: &JObject) -> String {
-        let s = unsafe { JString::from_raw(obj.as_raw()) };
-        env.get_string(&s).map(Into::into).unwrap_or_default()
+        if obj.is_null() {
+            return String::new();
+        }
+        let text = match env.call_method(obj, "toString", "()Ljava/lang/String;", &[]) {
+            Ok(v) => match v.l() {
+                Ok(o) => o,
+                Err(_) => {
+                    clear(env);
+                    return String::new();
+                }
+            },
+            Err(_) => {
+                clear(env);
+                return String::new();
+            }
+        };
+        match env.get_string(&unsafe { JString::from_raw(text.as_raw()) }) {
+            Ok(v) => v.into(),
+            Err(_) => {
+                clear(env);
+                String::new()
+            }
+        }
     }
 
     fn new_jstring<'a>(env: &mut JNIEnv<'a>, s: &str) -> Option<JObject<'a>> {
         env.new_string(s).ok().map(JObject::from)
     }
 
-    pub fn load_apps(env: &mut JNIEnv, activity: &JObject, images: &mut Images, dir: &str) -> Vec<crate::model::AppEntry> {
+    /// Wraps discovery so that whatever fails inside, no exception is left
+    /// pending when control returns to Java.
+    pub fn load_apps(
+        env: &mut JNIEnv,
+        activity: &JObject,
+        images: &mut Images,
+        dir: &str,
+    ) -> Vec<crate::model::AppEntry> {
+        let apps = load_apps_inner(env, activity, images, dir);
+        clear(env);
+        apps
+    }
+
+    fn load_apps_inner(
+        env: &mut JNIEnv,
+        activity: &JObject,
+        images: &mut Images,
+        dir: &str,
+    ) -> Vec<crate::model::AppEntry> {
         let mut apps = Vec::new();
         let Ok(pm_val) = env.call_method(activity, "getPackageManager", "()Landroid/content/pm/PackageManager;", &[]) else {
             return apps;
@@ -574,6 +661,9 @@ pub mod platform {
         let Ok(size) = size_val.i() else { return apps };
 
         for i in 0..size {
+            // A throw from one package (uninstalled mid-scan, hidden metadata)
+            // must not poison the rest of the loop.
+            clear(env);
             let Ok(ri_val) = env.call_method(&list, "get", "(I)Ljava/lang/Object;", &[JValue::Int(i)]) else {
                 continue;
             };
@@ -636,9 +726,10 @@ pub mod platform {
                                         size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                                     }
                                 }
-                                if let Ok(cat) = env.get_field(&ai, "category", "I") {
+                                                                if let Ok(cat) = env.get_field(&ai, "category", "I") {
                                     if let Ok(cat) = cat.i() {
-                                        is_game = cat == 0;
+                                        // ApplicationInfo.CATEGORY_GAME
+                                        is_game = cat == 2;
                                     }
                                 }
                             }
@@ -693,7 +784,28 @@ pub mod platform {
         Some(images.push(pixmap))
     }
 
-    fn load_icon(env: &mut JNIEnv, resolve_info: &JObject, pm: &JObject, images: &mut Images) -> Option<ImgId> {
+    /// Rasterises a launcher icon. A package without a usable icon is normal
+    /// (the card falls back to its procedural art), so every failure path ends
+    /// by clearing whatever exception the attempt raised.
+    fn load_icon(
+        env: &mut JNIEnv,
+        resolve_info: &JObject,
+        pm: &JObject,
+        images: &mut Images,
+    ) -> Option<ImgId> {
+        let out = load_icon_inner(env, resolve_info, pm, images);
+        if out.is_none() {
+            clear(env);
+        }
+        out
+    }
+
+    fn load_icon_inner(
+        env: &mut JNIEnv,
+        resolve_info: &JObject,
+        pm: &JObject,
+        images: &mut Images,
+    ) -> Option<ImgId> {
         let drawable = env
             .call_method(
                 resolve_info,
@@ -705,13 +817,20 @@ pub mod platform {
             .l()
             .ok()?;
         let size = 192i32;
+        // createBitmap wants a real Config; a null one is rejected on some builds.
+        let config_class = env.find_class("android/graphics/Bitmap$Config").ok()?;
+        let config = env
+            .get_static_field(&config_class, "ARGB_8888", "Landroid/graphics/Bitmap$Config;")
+            .ok()?
+            .l()
+            .ok()?;
         let bitmap_class = env.find_class("android/graphics/Bitmap").ok()?;
         let bitmap = env
             .call_static_method(
                 &bitmap_class,
                 "createBitmap",
                 "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;",
-                &[JValue::Int(size), JValue::Int(size), JValue::Object(&JObject::null())],
+                &[JValue::Int(size), JValue::Int(size), JValue::Object(&config)],
             )
             .ok()?
             .l()
@@ -766,6 +885,16 @@ pub mod platform {
         status: &mut crate::model::StatusBar,
         dir: &str,
     ) {
+        load_status_inner(env, activity, status, dir);
+        clear(env);
+    }
+
+    fn load_status_inner(
+        env: &mut JNIEnv,
+        activity: &JObject,
+        status: &mut crate::model::StatusBar,
+        dir: &str,
+    ) {
         if let Some(name) = new_jstring(env, "batterymanager") {
             if let Ok(bm_val) = env.call_method(
                 activity,
@@ -809,7 +938,11 @@ pub mod platform {
         }
         // Free space in the app's own filesystem.
         if !dir.is_empty() {
-            if let Ok(out) = std::process::Command::new("df").arg("-B1").arg(dir).output() {
+            if let Ok(out) = std::process::Command::new("/system/bin/df")
+                .arg("-B1")
+                .arg(dir)
+                .output()
+            {
                 let text = String::from_utf8_lossy(&out.stdout);
                 if let Some(line) = text.lines().nth(1) {
                     let cols: Vec<&str> = line.split_whitespace().collect();
