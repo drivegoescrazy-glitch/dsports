@@ -487,7 +487,7 @@ fn render_loop(window: NativeWindow) {
     let mut last_frame = std::time::Instant::now();
     let mut last_size = (0u32, 0u32);
     let mut pending: std::collections::HashSet<crate::gpu::LayerKey> = Default::default();
-    let mut last_bg: Option<usize> = None;
+    let mut last_bg: Option<crate::gpu::LayerKey> = None;
     let mut last_chrome: Option<crate::gpu::LayerKey> = None;
     let mut chrome_inflight: u32 = 0;
 
@@ -588,7 +588,7 @@ fn render_loop(window: NativeWindow) {
 
         // Expensive layers (full-screen backdrop, bar + panel) go off-thread.
         let mut want = Vec::with_capacity(3);
-        want.extend(scene.bg.iter().map(|(app, _)| crate::gpu::LayerKey::Bg(*app)));
+        want.extend(scene.bg.iter().map(|(app, _)| crate::gpu::bg_key(&snapshot, *app)));
         want.push(scene.chrome);
         for key in want {
             if drawer.has(key) || pending.contains(&key) {
@@ -611,7 +611,7 @@ fn render_loop(window: NativeWindow) {
         let mut quads: Vec<Drawn> = Vec::with_capacity(12);
         let mut drew_bg = false;
         for (app, alpha) in &scene.bg {
-            let key = crate::gpu::LayerKey::Bg(*app);
+            let key = crate::gpu::bg_key(&snapshot, *app);
             if drawer.has(key) {
                 quads.push(Drawn {
                     key,
@@ -621,13 +621,12 @@ fn render_loop(window: NativeWindow) {
                     h: sh as f32,
                     alpha: *alpha,
                 });
-                last_bg = Some(*app);
+                last_bg = Some(key);
                 drew_bg = true;
             }
         }
         if !drew_bg {
-            if let Some(app) = last_bg {
-                let key = crate::gpu::LayerKey::Bg(app);
+            if let Some(key) = last_bg {
                 if drawer.has(key) {
                     quads.push(Drawn {
                         key,
@@ -693,8 +692,8 @@ fn render_loop(window: NativeWindow) {
         if let Some(key) = last_chrome {
             keep.push(key);
         }
-        if let Some(app) = last_bg {
-            keep.push(crate::gpu::LayerKey::Bg(app));
+        if let Some(key) = last_bg {
+            keep.push(key);
         }
         drawer.retain(&keep);
         let _ = instance.swap_buffers(display, surface);

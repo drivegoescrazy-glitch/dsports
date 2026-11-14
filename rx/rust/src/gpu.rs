@@ -14,7 +14,7 @@ use tiny_skia::{Color, Pixmap};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum LayerKey {
     /// Full-bleed backdrop for one app.
-    Bg(usize),
+    Bg(usize, ImgId),
     /// Top bar, panel and any overlay; keyed by the state they were built from.
     Chrome(u64),
     /// One app's card artwork at its focused size.
@@ -52,6 +52,14 @@ pub fn layer_pixels(w: u32, h: u32) -> (u32, u32) {
         ((w as f32 * scale).round() as u32).max(1),
         ((h as f32 * scale).round() as u32).max(1),
     )
+}
+
+/// Builds an artwork-aware key for a full-screen game's backdrop.
+pub fn bg_key(state: &State, index: usize) -> LayerKey {
+    let art = state.apps.get(index)
+        .map(|app| if app.hero != ImgId::None { app.hero } else { app.boxart })
+        .unwrap_or(ImgId::None);
+    LayerKey::Bg(index, art)
 }
 
 pub fn scene(state: &State) -> Scene {
@@ -116,15 +124,14 @@ pub fn card_pixels(state: &State, w: u32, h: u32) -> (u32, u32) {
 pub fn build_layer(state: &State, key: LayerKey, w: u32, h: u32, images: &Images) -> Option<Pixmap> {
     let ctx = Ctx::new(w as f32, h as f32);
     match key {
-        LayerKey::Bg(i) => {
+        LayerKey::Bg(i, art) => {
             let mut pixmap = Pixmap::new(w, h)?;
             pixmap.fill(Color::BLACK);
             let app = state.apps.get(i)?;
-            let art = if app.hero != ImgId::None {
-                app.hero
-            } else {
-                app.boxart
-            };
+            let current_art = if app.hero != ImgId::None { app.hero } else { app.boxart };
+            if current_art != art {
+                return None;
+            }
             let mut cmds = Vec::with_capacity(8);
             home::backdrop(&mut cmds, &ctx, art, app.seed);
             Painter::new(images).paint(&mut pixmap, &cmds);
@@ -196,6 +203,16 @@ mod card_texture_tests {
         let before = scene(&state).cards.iter().find(|q| matches!(q.key, LayerKey::Card(0, _))).unwrap().key;
         state.apps[0].boxart = ImgId::Index(2);
         let after = scene(&state).cards.iter().find(|q| matches!(q.key, LayerKey::Card(0, _))).unwrap().key;
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn backdrop_cache_key_changes_when_art_changes() {
+        let mut state = State::new(demo_apps());
+        state.apps[0].boxart = ImgId::Index(4);
+        let before = super::bg_key(&state, 0);
+        state.apps[0].boxart = ImgId::Index(5);
+        let after = super::bg_key(&state, 0);
         assert_ne!(before, after);
     }
 }

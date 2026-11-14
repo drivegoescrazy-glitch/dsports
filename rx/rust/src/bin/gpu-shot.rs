@@ -57,7 +57,7 @@ fn main() {
     };
 
     for (app, alpha) in &scene.bg {
-        full(&mut cmds, LayerKey::Bg(*app), 0.0, 0.0, w as f32, h as f32, *alpha, &mut layers);
+        full(&mut cmds, gpu::bg_key(&state, *app), 0.0, 0.0, w as f32, h as f32, *alpha, &mut layers);
     }
     let ctx = nxs::ui::Ctx::new(w as f32, h as f32);
     for quad in &scene.cards {
