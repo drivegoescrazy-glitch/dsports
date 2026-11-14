@@ -13,6 +13,12 @@ name = "nxs-preview"
 path = "src/bin/preview.rs"
 required-features = ["preview"]
 
+# Composes the GL scene on the host so the layer path can be checked off-device.
+[[bin]]
+name = "gpu-shot"
+path = "src/bin/gpu-shot.rs"
+required-features = ["preview"]
+
 [features]
 preview = ["tiny-skia/png-format"]
 

@@ -461,6 +461,7 @@ fn render_loop(window: NativeWindow) {
     let mut pending: std::collections::HashSet<crate::gpu::LayerKey> = Default::default();
     let mut last_bg: Option<usize> = None;
     let mut last_chrome: Option<crate::gpu::LayerKey> = None;
+    let mut chrome_inflight: u32 = 0;
 
     // Backdrops and the chrome layer cost tens of milliseconds to rasterise, so
     // they are built on this thread and uploaded when they land. A frame only
@@ -526,6 +527,9 @@ fn render_loop(window: NativeWindow) {
         if let Ok(mut out) = results.lock() {
             for (key, pixmap) in out.drain(..) {
                 pending.remove(&key);
+                if matches!(key, crate::gpu::LayerKey::Chrome(_)) {
+                    chrome_inflight = chrome_inflight.saturating_sub(1);
+                }
                 unsafe { drawer.upload(key, &pixmap) };
             }
         }
@@ -556,6 +560,15 @@ fn render_loop(window: NativeWindow) {
         for key in want {
             if drawer.has(key) || pending.contains(&key) {
                 continue;
+            }
+            // A fast scroll can change the selection faster than a chrome layer
+            // can be rasterised; skip queueing more than a couple of them so a
+            // long flick does not build every intermediate panel.
+            if matches!(key, crate::gpu::LayerKey::Chrome(_)) && chrome_inflight >= 2 {
+                continue;
+            }
+            if matches!(key, crate::gpu::LayerKey::Chrome(_)) {
+                chrome_inflight += 1;
             }
             pending.insert(key);
             let _ = tx.send((key, snapshot.clone(), sw, sh, images.clone()));
@@ -643,6 +656,14 @@ fn render_loop(window: NativeWindow) {
         }
 
         unsafe { drawer.draw(sw, sh, &quads) };
+        let mut keep: Vec<crate::gpu::LayerKey> = quads.iter().map(|q| q.key).collect();
+        if let Some(key) = last_chrome {
+            keep.push(key);
+        }
+        if let Some(app) = last_bg {
+            keep.push(crate::gpu::LayerKey::Bg(app));
+        }
+        drawer.retain(&keep);
         let _ = instance.swap_buffers(display, surface);
         last_frame = std::time::Instant::now();
     }
@@ -734,6 +755,23 @@ impl Drawer {
         use glow::HasContext;
         for (_, tex) in self.textures.drain() {
             unsafe { self.gl.delete_texture(tex.id) };
+        }
+    }
+
+    /// Drops every layer the frame did not need, so browsing a long list does
+    /// not accumulate full-screen textures until the process is out of memory.
+    fn retain(&mut self, keep: &[crate::gpu::LayerKey]) {
+        use glow::HasContext;
+        let stale: Vec<crate::gpu::LayerKey> = self
+            .textures
+            .keys()
+            .copied()
+            .filter(|key| !keep.contains(key))
+            .collect();
+        for key in stale {
+            if let Some(tex) = self.textures.remove(&key) {
+                unsafe { self.gl.delete_texture(tex.id) };
+            }
         }
     }
 
