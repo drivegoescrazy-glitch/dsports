@@ -132,10 +132,27 @@ fn main() {
         });
     }
 
+    // The cached path must compose to exactly what the direct painter does.
+    {
+        let direct = nxs::render(&state, w, h, &images).unwrap();
+        let mut cache = nxs::Backdrop::new();
+        let plan = nxs::plan(&state, w, h, std::sync::Arc::new(images.clone()));
+        let _ = nxs::paint_plan(&plan, &mut cache);
+        let cached = nxs::paint_plan(&plan, &mut cache).unwrap();
+        let diff: u32 = direct
+            .data()
+            .iter()
+            .zip(cached.data())
+            .map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs())
+            .sum();
+        let mean = diff as f64 / direct.data().len() as f64;
+        println!("cached vs direct mean channel diff: {mean:.3}\n");
+    }
+
     // Cached path: the backdrop is built once, then each frame blends two cached
     // layers and paints the foreground.
     let images = std::sync::Arc::new(images);
-    for (w, h) in [(1024u32, 576u32), (1280, 720)] {
+    for (w, h) in [(1024u32, 576u32), (1280, 720), (1920, 864), (2400, 1080)] {
         let mut backdrop = nxs::Backdrop::new();
         let mut state = State::new(apps.clone());
         let warm = nxs::plan(&state, w, h, images.clone());

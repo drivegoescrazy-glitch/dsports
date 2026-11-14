@@ -469,16 +469,30 @@ pub fn panel(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State, top: f32) -> Rect {
     r
 }
 
-/// Everything except the backdrop, for frames composited over a cached one.
-pub fn build_foreground(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
-    top_bar(out, ctx, state);
+/// The moving part: just the card row.
+pub fn build_cards(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
     if state.dual {
         cards(out, ctx, state, 148.0, 372.0);
-        crate::dual::stack(out, ctx, state, 528.0, 1046.0);
     } else {
         cards(out, ctx, state, m::CARD_ROW_TOP, m::CARD_H);
+    }
+}
+
+/// The static part: top bar, panel and the dual-screen widgets. Rasterised
+/// into a cached layer, because none of it moves while the row is easing.
+pub fn build_chrome(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
+    top_bar(out, ctx, state);
+    if state.dual {
+        crate::dual::stack(out, ctx, state, 528.0, 1046.0);
+    } else {
         panel(out, ctx, state, m::PANEL_TOP);
     }
+}
+
+/// Everything except the backdrop (used by the preview).
+pub fn build_foreground(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
+    build_cards(out, ctx, state);
+    build_chrome(out, ctx, state);
 }
 
 /// Whole home screen. `dual` compresses the card row into the top half.

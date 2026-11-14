@@ -20,8 +20,8 @@ android {
         applicationId = "com.nxslauncher"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "1.0.6"
+        versionCode = 9
+        versionName = "1.0.7"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }

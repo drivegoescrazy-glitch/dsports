@@ -20,7 +20,7 @@ use scene::{Cmd, Images, Painter};
 use tiny_skia::Pixmap;
 use ui::Ctx;
 
-pub const VERSION: &str = "1.0.6";
+pub const VERSION: &str = "1.0.7";
 
 /// Builds the full command list for the current state and viewport.
 pub fn build_cmds(state: &State, width: u32, height: u32) -> Vec<Cmd> {
@@ -67,7 +67,11 @@ pub struct FrameArt {
 pub struct FramePlan {
     pub width: u32,
     pub height: u32,
+    /// The moving part (cards).
     pub cmds: Vec<Cmd>,
+    /// The static part (bar, panel); cached by `chrome_key`.
+    pub chrome: Vec<Cmd>,
+    pub chrome_key: u64,
     pub layers: [Option<FrameArt>; 2],
     pub frac: f32,
     pub images: std::sync::Arc<Images>,
@@ -77,11 +81,34 @@ pub struct FramePlan {
 /// full-screen images instead of rescaling artwork every frame.
 pub struct Backdrop {
     layers: Vec<Layer>,
+    chrome: Option<(u64, u32, u32, Pixmap)>,
 }
 
 impl Backdrop {
     pub fn new() -> Self {
-        Backdrop { layers: Vec::new() }
+        Backdrop {
+            layers: Vec::new(),
+            chrome: None,
+        }
+    }
+
+    /// Rasterises the chrome once per selection/size and reuses it, so the bar
+    /// and panel are not repainted on every frame.
+    fn ensure_chrome(&mut self, key: u64, w: u32, h: u32, cmds: &[Cmd], images: &Images) -> bool {
+        if let Some((k, cw, ch, _)) = &self.chrome {
+            if *k == key && *cw == w && *ch == h {
+                return false;
+            }
+        }
+        let Some(mut pixmap) = Pixmap::new(w, h) else { return false };
+        pixmap.fill(tiny_skia::Color::TRANSPARENT);
+        Painter::new(images).paint(&mut pixmap, cmds);
+        self.chrome = Some((key, w, h, pixmap));
+        true
+    }
+
+    fn chrome(&self) -> Option<&Pixmap> {
+        self.chrome.as_ref().map(|(_, _, _, p)| p)
     }
 
     fn art_of(state: &State, index: usize) -> scene::ImgId {
@@ -149,11 +176,27 @@ fn blend_pixmaps(dst: &mut Pixmap, src: &Pixmap, t: f32) {
 /// Everything that needs the state lock: layout, layer choice, image handle.
 pub fn plan(state: &State, width: u32, height: u32, images: std::sync::Arc<Images>) -> FramePlan {
     let ctx = Ctx::new(width as f32, height as f32);
-    let mut cmds = Vec::with_capacity(256);
-    home::build_foreground(&mut cmds, &ctx, state);
+    let mut cmds = Vec::with_capacity(64);
+    home::build_cards(&mut cmds, &ctx, state);
+    let mut chrome = Vec::with_capacity(192);
+    home::build_chrome(&mut chrome, &ctx, state);
     if state.overlay == model::Overlay::Settings {
-        settings(&mut cmds, &ctx, state);
+        settings(&mut chrome, &ctx, state);
     }
+    let chrome_key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        state.selected.hash(&mut hasher);
+        state.page.index().hash(&mut hasher);
+        (state.sort as u8).hash(&mut hasher);
+        state.dual.hash(&mut hasher);
+        (state.overlay as u8).hash(&mut hasher);
+        state.status.clock.hash(&mut hasher);
+        state.status.battery.hash(&mut hasher);
+        state.status.free_bytes.hash(&mut hasher);
+        state.apps.len().hash(&mut hasher);
+        hasher.finish()
+    };
     let visible = state.visible();
     let mut layers = [None, None];
     let mut frac = 0.0;
@@ -180,6 +223,8 @@ pub fn plan(state: &State, width: u32, height: u32, images: std::sync::Arc<Image
         width,
         height,
         cmds,
+        chrome,
+        chrome_key,
         layers,
         frac,
         images,
@@ -205,7 +250,38 @@ pub fn paint_plan(plan: &FramePlan, backdrop: &mut Backdrop) -> Option<Pixmap> {
         }
     }
     Painter::new(&plan.images).paint(&mut frame, &plan.cmds);
+    // The bar and panel come from a cached layer; compositing is a straight
+    // premultiplied over, far cheaper than repainting them.
+    backdrop.ensure_chrome(
+        plan.chrome_key,
+        plan.width,
+        plan.height,
+        &plan.chrome,
+        &plan.images,
+    );
+    if let Some(chrome) = backdrop.chrome() {
+        over(&mut frame, chrome);
+    }
     Some(frame)
+}
+
+/// `src` over `dst`, both premultiplied.
+fn over(dst: &mut Pixmap, src: &Pixmap) {
+    for (d, s) in dst.data_mut().chunks_exact_mut(4).zip(src.data().chunks_exact(4)) {
+        let a = s[3] as u32;
+        if a == 0 {
+            continue;
+        }
+        if a == 255 {
+            d.copy_from_slice(s);
+            continue;
+        }
+        let inv = 255 - a;
+        for c in 0..3 {
+            d[c] = (s[c] as u32 + (d[c] as u32 * inv) / 255).min(255) as u8;
+        }
+        d[3] = (a + (d[3] as u32 * inv) / 255).min(255) as u8;
+    }
 }
 
 /// Convenience wrapper: plan and paint in one go (preview and tests).

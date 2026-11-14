@@ -70,6 +70,7 @@ impl AppEntry {
     }
 }
 
+#[derive(Clone)]
 pub struct StatusBar {
     pub clock: String,
     pub battery: u8,
@@ -94,6 +95,7 @@ pub enum Overlay {
     Settings,
 }
 
+#[derive(Clone)]
 pub struct State {
     pub apps: Vec<AppEntry>,
     pub selected: usize,

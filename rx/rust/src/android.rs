@@ -22,7 +22,15 @@ use khronos_egl as egl;
 use ndk::native_window::NativeWindow;
 
 /// Longest edge of the pixmap that gets rasterised; larger surfaces upscale it.
-const RENDER_MAX_W: u32 = 1280;
+/// Raster widths are rounded to this step so cached layers stay valid between
+/// frames (the backdrop and chrome caches are keyed by size).
+const RENDER_STEP: u32 = 96;
+/// Never rasterise wider than this, however large the panel is.
+const RENDER_MAX_W: u32 = 2560;
+
+fn quantize(w: u32) -> u32 {
+    ((w + RENDER_STEP / 2) / RENDER_STEP * RENDER_STEP).max(480)
+}
 
 struct Engine {
     state: State,
@@ -32,6 +40,9 @@ struct Engine {
     height: u32,
     activity: Option<GlobalRef>,
     files_dir: String,
+    /// Bumped on every state change; a background sharp frame is only shown for
+    /// the version it was rendered from.
+    version: u64,
 }
 
 static ENGINE: OnceLock<Arc<(Mutex<Engine>, Condvar)>> = OnceLock::new();
@@ -49,6 +60,7 @@ fn engine() -> &'static Arc<(Mutex<Engine>, Condvar)> {
                 height: 1080,
                 activity: None,
                 files_dir: String::new(),
+                version: 0,
             }),
             Condvar::new(),
         ))
@@ -71,6 +83,17 @@ fn clear(env: &mut JNIEnv) {
 }
 
 fn mark_dirty() {
+    if let Some(arc) = ENGINE.get() {
+        let mut e = lock_engine(arc);
+        e.dirty = true;
+        e.version += 1;
+        arc.1.notify_all();
+    }
+}
+
+/// Wakes the render thread without invalidating the current version (used when
+/// a background frame is ready).
+fn wake() {
     if let Some(arc) = ENGINE.get() {
         let mut e = lock_engine(arc);
         e.dirty = true;
@@ -240,6 +263,7 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeTouch(
             }
         }
         e.dirty = true;
+        e.version += 1;
         arc.1.notify_all();
     }
     if let (Some(dual), arc) = (persist, engine()) {
@@ -427,6 +451,17 @@ fn render_loop(window: NativeWindow) {
     // Adaptive raster scale: slow hardware drops internal resolution (the GPU
     // upscales the texture) to hold frame rate; fast hardware stays at 1.0.
     let mut quality: f32 = 1.0;
+    let mut slow_frames = 0u32;
+    let mut fast_frames = 0u32;
+
+    // Full-resolution frames are rendered on a worker and swapped in when they
+    // are ready, so a sharp frame never stalls the interaction.
+    type SharpSlot = Arc<Mutex<Option<(u64, tiny_skia::Pixmap)>>>;
+    let sharp_slot: SharpSlot = Arc::new(Mutex::new(None));
+    let mut sharp_ready: Option<(u64, tiny_skia::Pixmap)> = None;
+    let mut sharp_inflight: Option<u64> = None;
+    let mut sharp_shown: u64 = u64::MAX;
+
     loop {
         if STOP.load(Ordering::SeqCst) {
             break;
@@ -437,9 +472,42 @@ fn render_loop(window: NativeWindow) {
         if since < Duration::from_millis(12) {
             thread::sleep(Duration::from_millis(12) - since);
         }
+        // A finished sharp frame is shown before any painting is attempted.
+        if let Ok(mut slot) = sharp_slot.lock() {
+            if let Some(done) = slot.take() {
+                sharp_inflight = None;
+                sharp_ready = Some(done);
+            }
+        }
+        if let Some((v, _)) = &sharp_ready {
+            let current = lock_engine(&arc).version;
+            if *v == current {
+                let (v, pixmap) = sharp_ready.take().unwrap();
+                let (sw, sh) = { let g = lock_engine(&arc); (g.width.max(1), g.height.max(1)) };
+                unsafe { drawer.draw(&pixmap, sw, sh) };
+                let _ = instance.swap_buffers(display, surface);
+                last_frame = std::time::Instant::now();
+                sharp_shown = v;
+                // Nothing left to do until the state changes again. The job's
+                // own wake-up is cleared here, or the next iteration would
+                // redraw a blurry frame over this one.
+                let mut guard = lock_engine(&arc);
+                guard.dirty = false;
+                while !guard.dirty && !STOP.load(Ordering::SeqCst) {
+                    let (next, _) = arc
+                        .1
+                        .wait_timeout(guard, Duration::from_secs(30))
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    guard = next;
+                }
+                continue;
+            }
+            sharp_ready = None;
+        }
+
         // Only layout happens under the engine lock, so a touch never waits for
         // a frame to finish painting. Painting uses the snapshot it was given.
-        let (plan, surf_w, surf_h) = {
+        let (plan, surf_w, surf_h, version, animating, snapshot) = {
             let mut guard = lock_engine(&arc);
             while !guard.dirty && !STOP.load(Ordering::SeqCst) {
                 let (next, _) = arc
@@ -458,18 +526,36 @@ fn render_loop(window: NativeWindow) {
             }
             let w = guard.width.max(1);
             let h = guard.height.max(1);
-            // 1280 px wide is CardsNX's own layout resolution; while the row is
-            // easing, a slightly smaller raster keeps the motion fluid.
-            let cap = RENDER_MAX_W.min(w);
-            let scale = if animating { 0.72 * quality } else { 1.0 };
-            let rw = ((cap as f32 * scale) as u32).max(320);
+            // Static frames render at the panel's own width: that is what makes
+            // text crisp. While the row is easing the raster shrinks to keep the
+            // motion fluid, and the size is quantised so cached layers (keyed by
+            // size) are reused instead of rebuilt every frame.
+            let full = w.min(RENDER_MAX_W);
+            let version = guard.version;
+            let settled = !animating && sharp_shown == version;
+            let target = if settled {
+                full
+            } else {
+                quantize((full as f32 * 0.5 * quality) as u32)
+            };
+            let rw = quantize(target);
             let rh = ((rw as f32 * h as f32 / w as f32).round() as u32).max(180);
+            // A snapshot is only needed when a sharp frame may be requested.
+            let snapshot = if !animating && sharp_shown != version {
+                Some(guard.state.clone())
+            } else {
+                None
+            };
             (
                 crate::plan(&guard.state, rw, rh, guard.images.clone()),
                 w,
                 h,
+                version,
+                animating,
+                snapshot,
             )
         };
+
         let paint_started = std::time::Instant::now();
         let frame = crate::paint_plan(&plan, &mut backdrop);
         if let Some(pixmap) = frame {
@@ -478,12 +564,51 @@ fn render_loop(window: NativeWindow) {
             unsafe { drawer.draw(&pixmap, surf_w, surf_h) };
             let _ = instance.swap_buffers(display, surface);
             last_frame = std::time::Instant::now();
-            // Aim at a ~20 ms frame budget while the row is moving.
+            // Aim at a ~20 ms frame budget while the row is moving, with
+            // hysteresis so the raster size does not oscillate every frame.
             let spent = paint_started.elapsed().as_secs_f32() * 1000.0;
             if spent > 26.0 {
-                quality = (quality * 0.88).max(0.5);
-            } else if spent < 12.0 {
-                quality = (quality * 1.04).min(1.0);
+                slow_frames += 1;
+                fast_frames = 0;
+            } else if spent < 11.0 {
+                fast_frames += 1;
+                slow_frames = 0;
+            } else {
+                fast_frames = 0;
+                slow_frames = 0;
+            }
+            if slow_frames >= 2 {
+                quality = (quality * 0.9).max(0.55);
+                slow_frames = 0;
+            } else if fast_frames >= 4 {
+                quality = (quality * 1.06).min(1.0);
+                fast_frames = 0;
+            }
+        }
+
+        // Settled: render one frame at the panel's own resolution in the
+        // background and show it when it lands.
+        if let Some(state) = snapshot {
+            if !animating && sharp_shown != version && sharp_inflight != Some(version) {
+                let slot = sharp_slot.clone();
+                let images = plan.images.clone();
+                let (w, h) = (surf_w, surf_h);
+                sharp_inflight = Some(version);
+                thread::Builder::new()
+                    .name("nxs-sharp".into())
+                    .spawn(move || {
+                        let rw = w.min(RENDER_MAX_W);
+                        let rh = ((rw as f32 * h as f32 / w as f32).round() as u32).max(180);
+                        let mut cache = crate::Backdrop::new();
+                        let plan = crate::plan(&state, rw, rh, images);
+                        if let Some(pixmap) = crate::paint_plan(&plan, &mut cache) {
+                            if let Ok(mut slot) = slot.lock() {
+                                *slot = Some((version, pixmap));
+                            }
+                            wake();
+                        }
+                    })
+                    .ok();
             }
         }
     }
