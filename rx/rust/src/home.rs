@@ -316,13 +316,14 @@ pub fn cards(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State, top: f32, height: f32
             });
         }
         // The focused card gets the thin white rim and a lift shadow.
-        if abs < 0.5 {
-            let focus_alpha = (1.0 - abs * 2.0).clamp(0.0, 1.0);
+        if abs < 1.0 {
+            // Outgoing and incoming cards share the highlight during a switch.
+            let focus_alpha = 1.0 - smooth(abs);
             out.push(Cmd::RoundRect {
                 rect: card,
                 radius: ctx.d(radius * scale),
                 fill: None,
-                stroke: Some((2.5 * ctx.s, white((190.0 * focus_alpha) as u8))),
+                stroke: Some((2.5 * ctx.s, white((255.0 * focus_alpha) as u8))),
             });
             out.push(Cmd::RoundRect {
                 rect: rect(card.left() - 2.0, card.top() + 6.0, card.width() + 4.0, card.height()),
@@ -527,8 +528,8 @@ pub fn card_specs(state: &State) -> Vec<CardSpec> {
             w: card_w,
             h: card_h,
             alpha: if abs > 0.55 { 0.92 } else { 1.0 },
-            rim: if abs < 0.5 {
-                (1.0 - abs * 2.0).clamp(0.0, 1.0)
+            rim: if abs < 1.0 {
+                1.0 - smooth(abs)
             } else {
                 0.0
             },
@@ -647,4 +648,25 @@ pub fn hit_actions(state: &State, _ctx: &Ctx) -> Vec<(crate::scene::Rect, Action
         return hits;
     }
     hits
+}
+
+#[cfg(test)]
+mod focus_border_tests {
+    use super::card_specs;
+    use crate::model::{demo_apps, State};
+
+    #[test]
+    fn focus_border_crossfades_between_two_cards() {
+        let mut state = State::new(demo_apps());
+        state.step(1);
+        state.scroll = 0.5;
+        let rims: Vec<f32> = card_specs(&state)
+            .into_iter()
+            .filter(|card| card.rim > 0.0)
+            .map(|card| card.rim)
+            .collect();
+        assert_eq!(rims.len(), 2);
+        assert!((rims[0] - 0.5).abs() < 0.01);
+        assert!((rims[1] - 0.5).abs() < 0.01);
+    }
 }

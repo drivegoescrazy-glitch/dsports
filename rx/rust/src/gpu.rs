@@ -18,7 +18,7 @@ pub enum LayerKey {
     /// Top bar, panel and any overlay; keyed by the state they were built from.
     Chrome(u64),
     /// One app's card artwork at its focused size.
-    Card(usize),
+    Card(usize, ImgId),
     /// The white focus rim, drawn over whichever card is centred.
     Rim,
 }
@@ -38,7 +38,7 @@ pub struct Scene {
     /// Backdrops to draw, in order, with their alpha (cross-fade).
     pub bg: Vec<(usize, f32)>,
     pub cards: Vec<Quad>,
-    pub rim: Option<Quad>,
+    pub rims: Vec<Quad>,
     pub chrome: LayerKey,
 }
 
@@ -70,10 +70,13 @@ pub fn scene(state: &State) -> Scene {
     }
 
     let mut cards = Vec::with_capacity(7);
-    let mut rim = None;
+    let mut rims = Vec::with_capacity(2);
     for spec in home::card_specs(state) {
+        let art = state.apps.get(spec.app)
+            .map(|app| if app.boxart != ImgId::None { app.boxart } else { app.icon })
+            .unwrap_or(ImgId::None);
         let quad = Quad {
-            key: LayerKey::Card(spec.app),
+            key: LayerKey::Card(spec.app, art),
             left: spec.left,
             top: spec.top,
             w: spec.w,
@@ -81,8 +84,9 @@ pub fn scene(state: &State) -> Scene {
             alpha: spec.alpha,
         };
         if spec.rim > 0.0 {
-            rim = Some(Quad {
-                alpha: spec.rim * 190.0 / 255.0,
+            rims.push(Quad {
+                key: LayerKey::Rim,
+                alpha: spec.rim,
                 ..quad
             });
         }
@@ -92,7 +96,7 @@ pub fn scene(state: &State) -> Scene {
     Scene {
         bg,
         cards,
-        rim,
+        rims,
         chrome: LayerKey::Chrome(crate::chrome_hash(state)),
     }
 }
@@ -137,11 +141,16 @@ pub fn build_layer(state: &State, key: LayerKey, w: u32, h: u32, images: &Images
             Painter::new(images).paint(&mut pixmap, &cmds);
             Some(pixmap)
         }
-        LayerKey::Card(i) => {
+        LayerKey::Card(i, art) => {
             let (pw, ph) = card_pixels(state, w, h);
             let mut pixmap = Pixmap::new(pw, ph)?;
             pixmap.fill(Color::TRANSPARENT);
             let app = state.apps.get(i)?;
+            let current_art = if app.boxart != ImgId::None { app.boxart } else { app.icon };
+            // A changed box-art/icon ID must never reuse an older cached card.
+            if current_art != art {
+                return None;
+            }
             let local = Ctx {
                 s: ctx.s,
                 ox: 0.0,
@@ -171,5 +180,22 @@ pub fn build_layer(state: &State, key: LayerKey, w: u32, h: u32, images: &Images
             Painter::new(images).paint(&mut pixmap, &cmds);
             Some(pixmap)
         }
+    }
+}
+
+#[cfg(test)]
+mod card_texture_tests {
+    use super::{scene, LayerKey};
+    use crate::model::{demo_apps, State};
+    use crate::scene::ImgId;
+
+    #[test]
+    fn card_cache_key_changes_when_box_art_changes() {
+        let mut state = State::new(demo_apps());
+        state.apps[0].boxart = ImgId::Index(1);
+        let before = scene(&state).cards.iter().find(|q| matches!(q.key, LayerKey::Card(0, _))).unwrap().key;
+        state.apps[0].boxart = ImgId::Index(2);
+        let after = scene(&state).cards.iter().find(|q| matches!(q.key, LayerKey::Card(0, _))).unwrap().key;
+        assert_ne!(before, after);
     }
 }

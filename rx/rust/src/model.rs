@@ -109,6 +109,8 @@ pub struct State {
     pub scroll: f32,
     /// Card position the row is easing toward.
     pub scroll_target: f32,
+    /// Scroll interpolation multiplier (1x–8x; default 4x).
+    pub scroll_speed: f32,
     pub hit: Vec<Hit>,
     /// In-flight gesture, in design space.
     pub gesture: Option<Gesture>,
@@ -167,6 +169,7 @@ impl State {
             overlay: Overlay::None,
             scroll: 0.0,
             scroll_target: 0.0,
+            scroll_speed: 4.0,
             hit: Vec::new(),
             gesture: None,
             persist: false,
@@ -300,6 +303,16 @@ impl State {
     }
 
     fn settings_hit(&mut self, x: f32, y: f32) -> Outcome {
+        // Horizontal speed slider, snapped to half steps for precise control.
+        if inside(x, y, 790.0, 400.0, 660.0, 60.0) {
+            let ratio = ((x - 830.0) / 580.0).clamp(0.0, 1.0);
+            let next_speed = ((1.0 + ratio * 7.0) * 2.0).round() / 2.0;
+            if (next_speed - self.scroll_speed).abs() >= 0.01 {
+                self.scroll_speed = next_speed.clamp(1.0, 8.0);
+                self.persist = true;
+            }
+            return Outcome::None;
+        }
         if inside(x, y, 1440.0, 316.0, 112.0, 60.0) {
             self.dual = !self.dual;
             self.persist = true;
@@ -369,8 +382,9 @@ impl State {
             self.scroll = self.scroll_target;
             return false;
         }
-        // Frame-rate independent ease, settling in about 250 ms.
-        let k = 1.0 - (-(dt_ms.max(0.1)) / 55.0).exp();
+        // Scale the existing frame-rate independent easing by the saved speed.
+        let speed = self.scroll_speed.clamp(1.0, 8.0);
+        let k = 1.0 - (-(dt_ms.max(0.1) * speed) / 55.0).exp();
         self.scroll += delta * k.clamp(0.0, 1.0);
         true
     }
@@ -413,4 +427,28 @@ pub fn demo_apps() -> Vec<AppEntry> {
             seed: (i as u32 * 47) % 360,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod scroll_speed_tests {
+    use super::{demo_apps, State};
+
+    #[test]
+    fn default_scroll_speed_is_four_times() {
+        let state = State::new(demo_apps());
+        assert!((state.scroll_speed - 4.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn faster_setting_advances_scroll_faster() {
+        let mut normal = State::new(demo_apps());
+        let mut fast = State::new(demo_apps());
+        normal.scroll_speed = 1.0;
+        fast.scroll_speed = 4.0;
+        normal.scroll_target = 1.0;
+        fast.scroll_target = 1.0;
+        assert!(normal.tick(16.0));
+        assert!(fast.tick(16.0));
+        assert!(fast.scroll > normal.scroll);
+    }
 }

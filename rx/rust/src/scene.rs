@@ -33,7 +33,7 @@ pub enum Fill {
     Vertical(Gradient),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ImgId {
     None,
     Index(usize),
