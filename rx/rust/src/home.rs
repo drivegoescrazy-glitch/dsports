@@ -469,6 +469,110 @@ pub fn panel(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State, top: f32) -> Rect {
     r
 }
 
+/// One card's place in the row, in design space. Shared by the CPU painter and
+/// the GL scene so both agree on where every card sits.
+#[derive(Clone, Copy)]
+pub struct CardSpec {
+    pub app: usize,
+    pub dist: f32,
+    pub scale: f32,
+    pub left: f32,
+    pub top: f32,
+    pub w: f32,
+    pub h: f32,
+    pub alpha: f32,
+    /// Strength of the white focus rim, 0 when the card is not near the centre.
+    pub rim: f32,
+}
+
+/// Design-space size of the focused card.
+pub fn card_size(state: &State) -> (f32, f32) {
+    if state.dual {
+        let h = 372.0;
+        (h * m::CARD_RATIO, h)
+    } else {
+        (m::CARD_H * m::CARD_RATIO, m::CARD_H)
+    }
+}
+
+pub fn card_specs(state: &State) -> Vec<CardSpec> {
+    let visible = state.visible();
+    let (w, h) = card_size(state);
+    let top = if state.dual { 148.0 } else { m::CARD_ROW_TOP };
+    let focus = state.scroll;
+    let pos = visible.iter().position(|i| *i == state.selected).unwrap_or(0) as f32;
+    let mut specs = Vec::with_capacity(7);
+    for offset in -3i32..=3 {
+        let idx = pos as i32 + offset;
+        if idx < 0 || idx as usize >= visible.len() {
+            continue;
+        }
+        let dist = idx as f32 - focus;
+        let abs = dist.abs();
+        if abs > 3.2 {
+            continue;
+        }
+        let t = (1.0 - (abs / 2.0)).clamp(0.0, 1.0);
+        let scale = m::CARD_BACK_SCALE + (1.0 - m::CARD_BACK_SCALE) * smooth(t);
+        let card_h = h * scale;
+        let card_w = w * scale;
+        let drop = m::CARD_BACK_DROP * (1.0 - smooth(t));
+        let center_x = 960.0 + dist * (w + m::CARD_GAP);
+        specs.push(CardSpec {
+            app: visible[idx as usize],
+            dist,
+            scale,
+            left: center_x - card_w * 0.5,
+            top: top + drop,
+            w: card_w,
+            h: card_h,
+            alpha: if abs > 0.55 { 0.92 } else { 1.0 },
+            rim: if abs < 0.5 {
+                (1.0 - abs * 2.0).clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+        });
+    }
+    specs
+}
+
+/// Card artwork only (no rim), drawn into a card-sized pixmap for the GPU path.
+pub fn card_art(out: &mut Vec<Cmd>, ctx: &Ctx, app: &crate::model::AppEntry, radius: f32) {
+    let card = rect(0.0, 0.0, ctx.w, ctx.h);
+    let art = if app.boxart != ImgId::None { app.boxart } else { app.icon };
+    if art != ImgId::None {
+        out.push(Cmd::Image {
+            rect: card,
+            radius,
+            img: art,
+            uv: rect(0.0, 0.0, 1.0, 1.0),
+            alpha: 1.0,
+            tint: None,
+        });
+    } else {
+        ui::card_placeholder(out, ctx, card, radius, app.seed);
+        out.push(Cmd::RoundRect {
+            rect: rect(0.0, card.height() * 0.55, ctx.w, card.height() * 0.45),
+            radius: 0.0,
+            fill: Some(Fill::Vertical(Gradient {
+                top: Color::from_rgba8(0, 0, 0, 0),
+                bottom: Color::from_rgba8(0, 0, 0, 120),
+            })),
+            stroke: None,
+        });
+        out.push(Cmd::Text {
+            text: text::ellipsize(&app.label, ctx.w * 0.8, ctx.d(34.0), Weight::Medium),
+            x: ctx.w * 0.5,
+            baseline: card.height() * 0.9,
+            size: ctx.d(34.0),
+            color: white(236),
+            weight: Weight::Medium,
+            align: Align::Center,
+        });
+    }
+}
+
 /// The moving part: just the card row.
 pub fn build_cards(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
     if state.dual {

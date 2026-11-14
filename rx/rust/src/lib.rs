@@ -5,6 +5,7 @@
 //! single texture through EGL; on the host the same frame is written to a PNG.
 
 pub mod dual;
+pub mod gpu;
 pub mod home;
 pub mod model;
 pub mod scene;
@@ -20,7 +21,7 @@ use scene::{Cmd, Images, Painter};
 use tiny_skia::Pixmap;
 use ui::Ctx;
 
-pub const VERSION: &str = "1.0.7";
+pub const VERSION: &str = "1.0.8";
 
 /// Builds the full command list for the current state and viewport.
 pub fn build_cmds(state: &State, width: u32, height: u32) -> Vec<Cmd> {
@@ -183,20 +184,7 @@ pub fn plan(state: &State, width: u32, height: u32, images: std::sync::Arc<Image
     if state.overlay == model::Overlay::Settings {
         settings(&mut chrome, &ctx, state);
     }
-    let chrome_key = {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        state.selected.hash(&mut hasher);
-        state.page.index().hash(&mut hasher);
-        (state.sort as u8).hash(&mut hasher);
-        state.dual.hash(&mut hasher);
-        (state.overlay as u8).hash(&mut hasher);
-        state.status.clock.hash(&mut hasher);
-        state.status.battery.hash(&mut hasher);
-        state.status.free_bytes.hash(&mut hasher);
-        state.apps.len().hash(&mut hasher);
-        hasher.finish()
-    };
+    let chrome_key = chrome_hash(state);
     let visible = state.visible();
     let mut layers = [None, None];
     let mut frac = 0.0;
@@ -296,7 +284,23 @@ pub fn render_cached(
     paint_plan(&plan, backdrop)
 }
 
-fn settings(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
+/// Identifies everything the chrome layer draws; changes when it must rebuild.
+pub fn chrome_hash(state: &State) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    state.selected.hash(&mut hasher);
+    state.page.index().hash(&mut hasher);
+    (state.sort as u8).hash(&mut hasher);
+    state.dual.hash(&mut hasher);
+    (state.overlay as u8).hash(&mut hasher);
+    state.status.clock.hash(&mut hasher);
+    state.status.battery.hash(&mut hasher);
+    state.status.free_bytes.hash(&mut hasher);
+    state.apps.len().hash(&mut hasher);
+    hasher.finish()
+}
+
+pub(crate) fn settings(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
     use crate::scene::{rect, Fill};
     use crate::text::{Align, Weight};
     use crate::theme::white;

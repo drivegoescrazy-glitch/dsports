@@ -21,16 +21,7 @@ use jni::JNIEnv;
 use khronos_egl as egl;
 use ndk::native_window::NativeWindow;
 
-/// Longest edge of the pixmap that gets rasterised; larger surfaces upscale it.
-/// Raster widths are rounded to this step so cached layers stay valid between
-/// frames (the backdrop and chrome caches are keyed by size).
-const RENDER_STEP: u32 = 96;
-/// Never rasterise wider than this, however large the panel is.
-const RENDER_MAX_W: u32 = 2560;
 
-fn quantize(w: u32) -> u32 {
-    ((w + RENDER_STEP / 2) / RENDER_STEP * RENDER_STEP).max(480)
-}
 
 struct Engine {
     state: State,
@@ -388,14 +379,31 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_onImagePicked(
 
 // ------------------------------------------------------------------ drawing
 
+/// A GPU copy of one cached layer.
+struct Tex {
+    id: glow::Texture,
+    w: u32,
+    h: u32,
+}
+
+/// One quad to draw, already in surface pixels.
+struct Drawn {
+    key: crate::gpu::LayerKey,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    alpha: f32,
+}
+
 struct Drawer {
     gl: glow::Context,
     program: glow::Program,
-    texture: glow::Texture,
     vao: Option<glow::VertexArray>,
     vbo: glow::Buffer,
-    tex_w: u32,
-    tex_h: u32,
+    alpha: Option<glow::UniformLocation>,
+    textures: std::collections::HashMap<crate::gpu::LayerKey, Tex>,
+    verts: Vec<f32>,
 }
 
 fn render_loop(window: NativeWindow) {
@@ -435,6 +443,8 @@ fn render_loop(window: NativeWindow) {
         return;
     }
 
+    let _ = instance.swap_interval(display, 1);
+
     let gl = unsafe {
         glow::Context::from_loader_function(|name| {
             instance
@@ -446,73 +456,43 @@ fn render_loop(window: NativeWindow) {
     let Some(mut drawer) = (unsafe { build_gl(gl) }) else { return };
 
     let arc = engine();
-    let mut backdrop = crate::Backdrop::new();
     let mut last_frame = std::time::Instant::now();
-    // Adaptive raster scale: slow hardware drops internal resolution (the GPU
-    // upscales the texture) to hold frame rate; fast hardware stays at 1.0.
-    let mut quality: f32 = 1.0;
-    let mut slow_frames = 0u32;
-    let mut fast_frames = 0u32;
+    let mut last_size = (0u32, 0u32);
+    let mut pending: std::collections::HashSet<crate::gpu::LayerKey> = Default::default();
+    let mut last_bg: Option<usize> = None;
+    let mut last_chrome: Option<crate::gpu::LayerKey> = None;
 
-    // Full-resolution frames are rendered on a worker and swapped in when they
-    // are ready, so a sharp frame never stalls the interaction.
-    type SharpSlot = Arc<Mutex<Option<(u64, tiny_skia::Pixmap)>>>;
-    let sharp_slot: SharpSlot = Arc::new(Mutex::new(None));
-    let mut sharp_ready: Option<(u64, tiny_skia::Pixmap)> = None;
-    let mut sharp_inflight: Option<u64> = None;
-    let mut sharp_shown: u64 = u64::MAX;
+    // Backdrops and the chrome layer cost tens of milliseconds to rasterise, so
+    // they are built on this thread and uploaded when they land. A frame only
+    // waits for the vsync, never for the rasteriser.
+    type Result1 = (crate::gpu::LayerKey, tiny_skia::Pixmap);
+    let results: Arc<Mutex<Vec<Result1>>> = Arc::new(Mutex::new(Vec::new()));
+    let (tx, rx) =
+        std::sync::mpsc::channel::<(crate::gpu::LayerKey, State, u32, u32, Arc<Images>)>();
+    {
+        let results = results.clone();
+        let _ = thread::Builder::new().name("nxs-build".into()).spawn(move || {
+            while let Ok((key, state, w, h, images)) = rx.recv() {
+                if let Some(pixmap) = crate::gpu::build_layer(&state, key, w, h, &images) {
+                    if let Ok(mut out) = results.lock() {
+                        out.push((key, pixmap));
+                    }
+                    wake();
+                }
+            }
+        });
+    }
 
     loop {
         if STOP.load(Ordering::SeqCst) {
             break;
         }
-        // A 120 Hz panel can deliver two move events per visible frame; waiting
-        // out the remainder keeps software rasterisation at ~60 fps, not 120.
-        let since = last_frame.elapsed();
-        if since < Duration::from_millis(12) {
-            thread::sleep(Duration::from_millis(12) - since);
-        }
-        // A finished sharp frame is shown before any painting is attempted.
-        if let Ok(mut slot) = sharp_slot.lock() {
-            if let Some(done) = slot.take() {
-                sharp_inflight = None;
-                sharp_ready = Some(done);
-            }
-        }
-        if let Some((v, _)) = &sharp_ready {
-            let current = lock_engine(&arc).version;
-            if *v == current {
-                let (v, pixmap) = sharp_ready.take().unwrap();
-                let (sw, sh) = { let g = lock_engine(&arc); (g.width.max(1), g.height.max(1)) };
-                unsafe { drawer.draw(&pixmap, sw, sh) };
-                let _ = instance.swap_buffers(display, surface);
-                last_frame = std::time::Instant::now();
-                sharp_shown = v;
-                // Nothing left to do until the state changes again. The job's
-                // own wake-up is cleared here, or the next iteration would
-                // redraw a blurry frame over this one.
-                let mut guard = lock_engine(&arc);
-                guard.dirty = false;
-                while !guard.dirty && !STOP.load(Ordering::SeqCst) {
-                    let (next, _) = arc
-                        .1
-                        .wait_timeout(guard, Duration::from_secs(30))
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    guard = next;
-                }
-                continue;
-            }
-            sharp_ready = None;
-        }
-
-        // Only layout happens under the engine lock, so a touch never waits for
-        // a frame to finish painting. Painting uses the snapshot it was given.
-        let (plan, surf_w, surf_h, version, animating, snapshot) = {
+        let (scene, snapshot, images, sw, sh) = {
             let mut guard = lock_engine(&arc);
             while !guard.dirty && !STOP.load(Ordering::SeqCst) {
                 let (next, _) = arc
                     .1
-                    .wait_timeout(guard, Duration::from_secs(30))
+                    .wait_timeout(guard, Duration::from_millis(500))
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 guard = next;
             }
@@ -520,97 +500,151 @@ fn render_loop(window: NativeWindow) {
                 break;
             }
             guard.dirty = false;
-            let animating = guard.state.tick(12.0);
-            if animating {
+            // Animation is timed against the real frame interval, so the easing
+            // is identical at 60 Hz and at 120 Hz.
+            let dt = last_frame.elapsed().as_secs_f32() * 1000.0;
+            if guard.state.tick(dt.clamp(1.0, 50.0)) {
                 guard.dirty = true;
             }
-            let w = guard.width.max(1);
-            let h = guard.height.max(1);
-            // Static frames render at the panel's own width: that is what makes
-            // text crisp. While the row is easing the raster shrinks to keep the
-            // motion fluid, and the size is quantised so cached layers (keyed by
-            // size) are reused instead of rebuilt every frame.
-            let full = w.min(RENDER_MAX_W);
-            let version = guard.version;
-            let settled = !animating && sharp_shown == version;
-            let target = if settled {
-                full
-            } else {
-                quantize((full as f32 * 0.5 * quality) as u32)
-            };
-            let rw = quantize(target);
-            let rh = ((rw as f32 * h as f32 / w as f32).round() as u32).max(180);
-            // A snapshot is only needed when a sharp frame may be requested.
-            let snapshot = if !animating && sharp_shown != version {
-                Some(guard.state.clone())
-            } else {
-                None
-            };
             (
-                crate::plan(&guard.state, rw, rh, guard.images.clone()),
-                w,
-                h,
-                version,
-                animating,
-                snapshot,
+                crate::gpu::scene(&guard.state),
+                guard.state.clone(),
+                guard.images.clone(),
+                guard.width.max(1),
+                guard.height.max(1),
             )
         };
 
-        let paint_started = std::time::Instant::now();
-        let frame = crate::paint_plan(&plan, &mut backdrop);
-        if let Some(pixmap) = frame {
-            // The shader's full-screen quad covers the surface, so a smaller
-            // pixmap simply scales up to the window.
-            unsafe { drawer.draw(&pixmap, surf_w, surf_h) };
-            let _ = instance.swap_buffers(display, surface);
-            last_frame = std::time::Instant::now();
-            // Aim at a ~20 ms frame budget while the row is moving, with
-            // hysteresis so the raster size does not oscillate every frame.
-            let spent = paint_started.elapsed().as_secs_f32() * 1000.0;
-            if spent > 26.0 {
-                slow_frames += 1;
-                fast_frames = 0;
-            } else if spent < 11.0 {
-                fast_frames += 1;
-                slow_frames = 0;
-            } else {
-                fast_frames = 0;
-                slow_frames = 0;
-            }
-            if slow_frames >= 2 {
-                quality = (quality * 0.9).max(0.55);
-                slow_frames = 0;
-            } else if fast_frames >= 4 {
-                quality = (quality * 1.06).min(1.0);
-                fast_frames = 0;
+        if (sw, sh) != last_size {
+            drawer.clear();
+            pending.clear();
+            last_bg = None;
+            last_chrome = None;
+            last_size = (sw, sh);
+        }
+
+        if let Ok(mut out) = results.lock() {
+            for (key, pixmap) in out.drain(..) {
+                pending.remove(&key);
+                unsafe { drawer.upload(key, &pixmap) };
             }
         }
 
-        // Settled: render one frame at the panel's own resolution in the
-        // background and show it when it lands.
-        if let Some(state) = snapshot {
-            if !animating && sharp_shown != version && sharp_inflight != Some(version) {
-                let slot = sharp_slot.clone();
-                let images = plan.images.clone();
-                let (w, h) = (surf_w, surf_h);
-                sharp_inflight = Some(version);
-                thread::Builder::new()
-                    .name("nxs-sharp".into())
-                    .spawn(move || {
-                        let rw = w.min(RENDER_MAX_W);
-                        let rh = ((rw as f32 * h as f32 / w as f32).round() as u32).max(180);
-                        let mut cache = crate::Backdrop::new();
-                        let plan = crate::plan(&state, rw, rh, images);
-                        if let Some(pixmap) = crate::paint_plan(&plan, &mut cache) {
-                            if let Ok(mut slot) = slot.lock() {
-                                *slot = Some((version, pixmap));
-                            }
-                            wake();
-                        }
-                    })
-                    .ok();
+        // Cards and the focus rim are small, so they are built inline: they are
+        // always at full resolution no matter what the frame is doing.
+        let (card_w, card_h) = crate::gpu::card_pixels(&snapshot, sw, sh);
+        for quad in &scene.cards {
+            if drawer.size(quad.key) == Some((card_w, card_h)) {
+                continue;
+            }
+            if let Some(pixmap) = crate::gpu::build_layer(&snapshot, quad.key, sw, sh, &images) {
+                unsafe { drawer.upload(quad.key, &pixmap) };
             }
         }
+        if scene.rim.is_some() && drawer.size(crate::gpu::LayerKey::Rim) != Some((card_w, card_h)) {
+            if let Some(pixmap) =
+                crate::gpu::build_layer(&snapshot, crate::gpu::LayerKey::Rim, sw, sh, &images)
+            {
+                unsafe { drawer.upload(crate::gpu::LayerKey::Rim, &pixmap) };
+            }
+        }
+
+        // Expensive layers (full-screen backdrop, bar + panel) go off-thread.
+        let mut want = Vec::with_capacity(3);
+        want.extend(scene.bg.iter().map(|(app, _)| crate::gpu::LayerKey::Bg(*app)));
+        want.push(scene.chrome);
+        for key in want {
+            if drawer.has(key) || pending.contains(&key) {
+                continue;
+            }
+            pending.insert(key);
+            let _ = tx.send((key, snapshot.clone(), sw, sh, images.clone()));
+        }
+
+        let ctx = crate::ui::Ctx::new(sw as f32, sh as f32);
+        let mut quads: Vec<Drawn> = Vec::with_capacity(12);
+        let mut drew_bg = false;
+        for (app, alpha) in &scene.bg {
+            let key = crate::gpu::LayerKey::Bg(*app);
+            if drawer.has(key) {
+                quads.push(Drawn {
+                    key,
+                    x: 0.0,
+                    y: 0.0,
+                    w: sw as f32,
+                    h: sh as f32,
+                    alpha: *alpha,
+                });
+                last_bg = Some(*app);
+                drew_bg = true;
+            }
+        }
+        if !drew_bg {
+            if let Some(app) = last_bg {
+                let key = crate::gpu::LayerKey::Bg(app);
+                if drawer.has(key) {
+                    quads.push(Drawn {
+                        key,
+                        x: 0.0,
+                        y: 0.0,
+                        w: sw as f32,
+                        h: sh as f32,
+                        alpha: 1.0,
+                    });
+                }
+            }
+        }
+        for quad in &scene.cards {
+            if !drawer.has(quad.key) {
+                continue;
+            }
+            quads.push(Drawn {
+                key: quad.key,
+                x: ctx.x(quad.left),
+                y: ctx.y(quad.top),
+                w: ctx.d(quad.w),
+                h: ctx.d(quad.h),
+                alpha: quad.alpha,
+            });
+        }
+        if let Some(rim) = &scene.rim {
+            if drawer.has(rim.key) {
+                quads.push(Drawn {
+                    key: rim.key,
+                    x: ctx.x(rim.left),
+                    y: ctx.y(rim.top),
+                    w: ctx.d(rim.w),
+                    h: ctx.d(rim.h),
+                    alpha: rim.alpha,
+                });
+            }
+        }
+        if drawer.has(scene.chrome) {
+            last_chrome = Some(scene.chrome);
+            quads.push(Drawn {
+                key: scene.chrome,
+                x: 0.0,
+                y: 0.0,
+                w: sw as f32,
+                h: sh as f32,
+                alpha: 1.0,
+            });
+        } else if let Some(key) = last_chrome {
+            if drawer.has(key) {
+                quads.push(Drawn {
+                    key,
+                    x: 0.0,
+                    y: 0.0,
+                    w: sw as f32,
+                    h: sh as f32,
+                    alpha: 1.0,
+                });
+            }
+        }
+
+        unsafe { drawer.draw(sw, sh, &quads) };
+        let _ = instance.swap_buffers(display, surface);
+        last_frame = std::time::Instant::now();
     }
 
     unsafe { teardown(&mut drawer) };
@@ -634,7 +668,7 @@ unsafe fn build_gl(gl: glow::Context) -> Option<Drawer> {
     gl.shader_source(
         fs,
         "precision mediump float; varying vec2 v_uv; uniform sampler2D tex;\
-         void main() { gl_FragColor = texture2D(tex, v_uv); }",
+         uniform float a; void main() { gl_FragColor = texture2D(tex, v_uv) * a; }",
     );
     gl.compile_shader(fs);
     gl.attach_shader(program, vs);
@@ -670,84 +704,139 @@ unsafe fn build_gl(gl: glow::Context) -> Option<Drawer> {
         gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, 16, 8);
     }
 
-    let texture = gl.create_texture().ok()?;
-    gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-    gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+    let alpha = gl.get_uniform_location(program, "a");
+    // Blending is premultiplied over: every layer is premultiplied RGBA.
     gl.disable(glow::DEPTH_TEST);
-    gl.disable(glow::BLEND);
+    gl.enable(glow::BLEND);
+    gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
 
     Some(Drawer {
         gl,
         program,
-        texture,
         vao,
         vbo,
-        tex_w: 0,
-        tex_h: 0,
+        alpha,
+        textures: std::collections::HashMap::new(),
+        verts: vec![0.0; 16],
     })
 }
 
 impl Drawer {
-    unsafe fn draw(&mut self, pixmap: &tiny_skia::Pixmap, surface_w: u32, surface_h: u32) {
+    fn has(&self, key: crate::gpu::LayerKey) -> bool {
+        self.textures.contains_key(&key)
+    }
+
+    fn size(&self, key: crate::gpu::LayerKey) -> Option<(u32, u32)> {
+        self.textures.get(&key).map(|t| (t.w, t.h))
+    }
+
+    fn clear(&mut self) {
+        use glow::HasContext;
+        for (_, tex) in self.textures.drain() {
+            unsafe { self.gl.delete_texture(tex.id) };
+        }
+    }
+
+    /// Uploads a layer, replacing any previous version of it.
+    unsafe fn upload(&mut self, key: crate::gpu::LayerKey, pixmap: &tiny_skia::Pixmap) {
         use glow::HasContext;
         let gl = &self.gl;
-        // The viewport is the window, not the texture: the pixmap may be a
-        // smaller raster that the shader's full-screen quad scales up. Setting
-        // the viewport to the texture size drew the UI into a corner.
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        if let Some(tex) = self.textures.get_mut(&key) {
+            if tex.w == pixmap.width() && tex.h == pixmap.height() {
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex.id));
+                gl.tex_sub_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    0,
+                    0,
+                    pixmap.width() as i32,
+                    pixmap.height() as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(pixmap.data()),
+                );
+                return;
+            }
+            gl.delete_texture(tex.id);
+            self.textures.remove(&key);
+        }
+        let Ok(id) = gl.create_texture() else { return };
+        gl.bind_texture(glow::TEXTURE_2D, Some(id));
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            pixmap.width() as i32,
+            pixmap.height() as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            Some(pixmap.data()),
+        );
+        self.textures.insert(
+            key,
+            Tex {
+                id,
+                w: pixmap.width(),
+                h: pixmap.height(),
+            },
+        );
+    }
+
+    unsafe fn draw(&mut self, surface_w: u32, surface_h: u32, quads: &[Drawn]) {
+        use glow::HasContext;
+        let gl = &self.gl;
+        let (sw, sh) = (surface_w.max(1) as f32, surface_h.max(1) as f32);
         gl.viewport(0, 0, surface_w as i32, surface_h as i32);
         gl.clear_color(0.0, 0.0, 0.0, 1.0);
         gl.clear(glow::COLOR_BUFFER_BIT);
-        gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
-        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-        if pixmap.width() != self.tex_w || pixmap.height() != self.tex_h {
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA as i32,
-                pixmap.width() as i32,
-                pixmap.height() as i32,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                Some(pixmap.data()),
-            );
-            self.tex_w = pixmap.width();
-            self.tex_h = pixmap.height();
-        } else {
-            gl.tex_sub_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                0,
-                0,
-                pixmap.width() as i32,
-                pixmap.height() as i32,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(pixmap.data()),
-            );
-        }
         gl.use_program(Some(self.program));
         if let Some(vao) = self.vao {
             gl.bind_vertex_array(Some(vao));
-        } else {
+        }
+        for quad in quads {
+            let Some(tex) = self.textures.get(&quad.key) else {
+                continue;
+            };
+            if quad.w <= 0.5 || quad.h <= 0.5 {
+                continue;
+            }
+            // Premultiplied texture scaled by alpha: still valid premultiplied colour.
+            gl.uniform_1_f32(self.alpha.as_ref(), quad.alpha.clamp(0.0, 1.0));
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex.id));
+
+            let l = quad.x / sw * 2.0 - 1.0;
+            let r = (quad.x + quad.w) / sw * 2.0 - 1.0;
+            let t = 1.0 - quad.y / sh * 2.0;
+            let b = 1.0 - (quad.y + quad.h) / sh * 2.0;
+            self.verts = vec![
+                l, b, 0.0, 1.0, //
+                r, b, 1.0, 1.0, //
+                l, t, 0.0, 0.0, //
+                r, t, 1.0, 0.0,
+            ];
+            let bytes = std::slice::from_raw_parts(self.verts.as_ptr() as *const u8, 64);
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::DYNAMIC_DRAW);
             gl.enable_vertex_attrib_array(0);
             gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 16, 0);
             gl.enable_vertex_attrib_array(1);
             gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, 16, 8);
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
-        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
     }
 }
 
 unsafe fn teardown(drawer: &mut Drawer) {
     use glow::HasContext;
+    drawer.clear();
     let gl = &drawer.gl;
     gl.delete_program(drawer.program);
-    gl.delete_texture(drawer.texture);
     if let Some(vao) = drawer.vao {
         gl.delete_vertex_array(vao);
     }
