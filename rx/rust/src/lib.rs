@@ -20,7 +20,7 @@ use scene::{Cmd, Images, Painter};
 use tiny_skia::Pixmap;
 use ui::Ctx;
 
-pub const VERSION: &str = "1.0.2";
+pub const VERSION: &str = "1.0.4";
 
 /// Builds the full command list for the current state and viewport.
 pub fn build_cmds(state: &State, width: u32, height: u32) -> Vec<Cmd> {

@@ -21,6 +21,9 @@ use jni::JNIEnv;
 use khronos_egl as egl;
 use ndk::native_window::NativeWindow;
 
+/// Longest edge of the pixmap that gets rasterised; larger surfaces upscale it.
+const RENDER_MAX_W: u32 = 1280;
+
 struct Engine {
     state: State,
     images: Images,
@@ -416,9 +419,16 @@ fn render_loop(window: NativeWindow) {
     let Some(mut drawer) = (unsafe { build_gl(gl) }) else { return };
 
     let arc = engine();
+    let mut last_frame = std::time::Instant::now();
     loop {
         if STOP.load(Ordering::SeqCst) {
             break;
+        }
+        // A 120 Hz panel can deliver two move events per visible frame; waiting
+        // out the remainder keeps software rasterisation at ~60 fps, not 120.
+        let since = last_frame.elapsed();
+        if since < Duration::from_millis(12) {
+            thread::sleep(Duration::from_millis(12) - since);
         }
         let frame = {
             let mut guard = lock_engine(&arc);
@@ -433,11 +443,26 @@ fn render_loop(window: NativeWindow) {
                 break;
             }
             guard.dirty = false;
-            crate::render(&guard.state, guard.width, guard.height, &guard.images)
+            // tiny-skia is a CPU rasteriser: a full-resolution 1080p+ frame costs
+            // several milliseconds per touch event. Rasterising at most 1280 px
+            // wide and letting the GPU upscale the texture keeps sliding smooth,
+            // and 1280x720 is exactly the resolution CardsNX itself lays out in.
+            let w = guard.width;
+            let h = guard.height;
+            let (rw, rh) = if w > RENDER_MAX_W {
+                let scale = RENDER_MAX_W as f32 / w as f32;
+                (RENDER_MAX_W, ((h as f32) * scale).round().max(1.0) as u32)
+            } else {
+                (w, h)
+            };
+            crate::render(&guard.state, rw, rh, &guard.images)
         };
         if let Some(pixmap) = frame {
+            // The shader's full-screen quad covers the surface, so a smaller
+            // pixmap simply scales up to the window.
             unsafe { drawer.draw(&pixmap) };
             let _ = instance.swap_buffers(display, surface);
+            last_frame = std::time::Instant::now();
         }
     }
 

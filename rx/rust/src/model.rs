@@ -226,33 +226,43 @@ impl State {
                 return Outcome::None;
             }
         }
-        // Play pill.
-        if inside(x, y, 324.0, 952.0, 300.0, 76.0) {
+        // Play pill, inside the CardsNX panel.
+        if inside(x, y, 316.0, 950.0, 300.0, 76.0) {
             if let Some(app) = self.selected_app() {
                 return Outcome::Launch(app.package.clone());
             }
         }
-        // Settings gear.
-        if (x - 1800.0).powi(2) + (y - 96.0).powi(2) < 60.0 * 60.0 {
+        // Settings gear (kGearX 1146 on the 1280 layout).
+        if (x - crate::theme::m::BAR_GEAR_X).powi(2) + (y - crate::theme::m::TOP_MARGIN).powi(2)
+            < crate::theme::m::BTN_D.powi(2)
+        {
             self.overlay = Overlay::Settings;
             return Outcome::None;
         }
-        // Page title pill: cycle pages.
-        if inside(x, y, 440.0, 40.0, 322.0, 112.0) {
+        // Status pill: cycle pages.
+        if inside(
+            x,
+            y,
+            crate::theme::m::BAR_PILL_LEFT,
+            crate::theme::m::TOP_MARGIN - crate::theme::m::BTN_D * 0.5,
+            crate::theme::m::BAR_PILL_RIGHT - crate::theme::m::BAR_PILL_LEFT,
+            crate::theme::m::BTN_D,
+        ) {
             self.page_shift(1);
             return Outcome::None;
         }
 
         // Cards: pick the nearest card centre, tap again to launch.
-        let (top, h) = if self.dual { (148.0, 372.0) } else { (158.0, 540.0) };
+        let (top, h) = if self.dual { (148.0, 372.0) } else { (crate::theme::m::CARD_ROW_TOP, crate::theme::m::CARD_H) };
         if y >= top - 20.0 && y <= top + h + 40.0 {
-            let w = h * (2.0 / 3.0);
+            let w = h * crate::theme::m::CARD_RATIO;
+            let pitch = w + crate::theme::m::CARD_GAP;
             let visible = self.visible();
             if visible.is_empty() {
                 return Outcome::None;
             }
             let pos = visible.iter().position(|i| *i == self.selected).unwrap_or(0) as f32;
-            let delta = ((x - 960.0) / (w + 26.0)).round();
+            let delta = ((x - 960.0) / pitch).round();
             let target = (pos + delta).clamp(0.0, (visible.len() - 1) as f32) as usize;
             let index = visible[target];
             if index == self.selected {
@@ -293,11 +303,18 @@ impl State {
 
     /// Indices of the apps on the active page, in display order.
     pub fn visible(&self) -> Vec<usize> {
+        // Android apps hardly ever declare android:category="game", so the
+        // Games page is the whole shelf (as CardsNX's HOME is) rather than a
+        // filter that comes back empty. Apps/Media stay narrower views.
         let mut idx: Vec<usize> = self
             .apps
             .iter()
             .enumerate()
-            .filter(|(_, a)| self.page == Page::All || a.page() == self.page)
+            .filter(|(_, a)| match self.page {
+                Page::Games | Page::All => true,
+                Page::Apps => !a.is_media,
+                Page::Media => a.is_media,
+            })
             .map(|(i, _)| i)
             .collect();
         match self.sort {
