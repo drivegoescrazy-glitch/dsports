@@ -294,7 +294,8 @@ impl State {
                 self.last_tap = Some((index, 0));
             } else {
                 self.selected = index;
-                self.scroll = target as f32;
+                // Keep the current offset and animate toward the tapped game,
+                // so the focus border crossfades just like keyboard navigation.
                 self.scroll_target = target as f32;
                 self.last_tap = None;
             }
