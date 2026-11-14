@@ -102,6 +102,7 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeCreate(
     _package: JString,
 ) {
     let dir: String = env.get_string(&files_dir).map(Into::into).unwrap_or_default();
+    crate::text::set_font_dir(&dir);
 
     let (vm, activity) = {
         let arc = engine();

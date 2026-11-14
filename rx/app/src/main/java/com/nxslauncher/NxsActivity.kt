@@ -15,6 +15,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.WindowManager
+import java.io.File
 
 /**
  * Thin platform shell. Everything visual lives in Rust: this activity only owns
@@ -49,10 +50,33 @@ class NxsActivity : Activity(), SurfaceHolder.Callback {
                 View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
 
+        installFonts()
+
         view = SurfaceView(this)
         view.holder.addCallback(this)
         view.holder.setFormat(android.graphics.PixelFormat.OPAQUE)
         setContentView(view)
+    }
+
+    /**
+     * CardsNX's Inter faces are bundled; they are unpacked once so the Rust
+     * renderer can read them like any other file, keeping the APK's asset
+     * compressor out of the hot path.
+     */
+    private fun installFonts() {
+        val dir = File(filesDir, "fonts")
+        dir.mkdirs()
+        for (name in arrayOf("Inter-500.ttf", "Inter-600.ttf", "Inter-700.ttf")) {
+            val out = File(dir, name)
+            if (out.length() > 0L) continue
+            try {
+                assets.open("fonts/$name").use { input ->
+                    out.outputStream().use { output -> input.copyTo(output) }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "could not install $name", t)
+            }
+        }
     }
 
     // ---------------------------------------------------------------- surface

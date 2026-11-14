@@ -59,46 +59,68 @@ pub fn hero(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
 }
 
 pub fn top_bar(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
-    let cy = ui::TOP_BAR_CY;
-    let d = 112.0;
-    // Left cluster: menu, grid, sort.
-    ui::circle_button(out, ctx, 104.0, cy, d, Glyph::Menu, false);
-    ui::circle_button(out, ctx, 236.0, cy, d, Glyph::Grid, false);
-    ui::circle_button(out, ctx, 368.0, cy, d, Glyph::Sort, false);
+    // Exactly CardsNX's top bar: menu / Discord / sort on the left, one pill from
+    // kPillLeft to kPillRight, then bell / music / power / settings.
+    let cy = m::TOP_MARGIN;
+    let d = m::BTN_D;
+    ui::circle_button(out, ctx, m::BAR_MENU_X, cy, d, Glyph::Menu, false);
+    ui::circle_button(out, ctx, m::BAR_DISCORD_X, cy, d, Glyph::Grid, false);
+    ui::circle_button(out, ctx, m::BAR_SORT_X, cy, d, Glyph::Sort, false);
 
-    // Page title pill with the profile bubble, like the reference's "Title 119".
-    let pill_r = ctx.r(440.0, cy - 56.0, 322.0, 112.0);
-    glass(out, ctx, pill_r, ctx.d(56.0), 0.9);
-    label(out, ctx, state.page.title(), 472.0, cy + 12.0, 40.0, Palette::TEXT(), Weight::Medium, Align::Left);
+    let pill = ctx.r(
+        m::BAR_PILL_LEFT,
+        cy - d * 0.5,
+        m::BAR_PILL_RIGHT - m::BAR_PILL_LEFT,
+        d,
+    );
+    glass(out, ctx, pill, ctx.d(d * 0.5), 1.0);
+    label(
+        out,
+        ctx,
+        state.page.title(),
+        m::BAR_PILL_LEFT + 40.0,
+        cy + 13.0,
+        38.0,
+        Palette::TEXT(),
+        Weight::Medium,
+        Align::Left,
+    );
+    // The profile bubble that opens the user menu.
     out.push(Cmd::Circle {
-        cx: ctx.x(724.0),
+        cx: ctx.x(m::BAR_PILL_LEFT + 262.0),
         cy: ctx.y(cy),
-        radius: ctx.d(34.0),
+        radius: ctx.d(38.0),
         fill: Some(Fill::Vertical(Gradient {
             top: Color::from_rgba8(0xFF, 0x6B, 0x8A, 255),
             bottom: Color::from_rgba8(0xC0, 0x2E, 0x50, 255),
         })),
         stroke: Some((1.5 * ctx.s, white(60))),
     });
-    glyph_at(out, ctx, Glyph::User, 724.0, cy, 40.0, white(240));
+    glyph_at(out, ctx, Glyph::User, m::BAR_PILL_LEFT + 262.0, cy, 40.0, white(240));
 
-    // Right cluster, right-aligned: bell, music, power, gear as circles...
-    ui::circle_button(out, ctx, 1800.0, cy, d, Glyph::Gear, false);
-    ui::circle_button(out, ctx, 1680.0, cy, d, Glyph::Power, false);
-    ui::circle_button(out, ctx, 1560.0, cy, d, Glyph::Music, false);
-    ui::circle_button(out, ctx, 1440.0, cy, d, Glyph::Bell, false);
-    ui::circle_button(out, ctx, 1320.0, cy, 96.0, Glyph::Help, false);
-
-    // ...and the status text before them.
     status_readout(out, ctx, state);
+
+    ui::circle_button(out, ctx, m::BAR_BELL_X, cy, d, Glyph::Bell, false);
+    ui::circle_button(out, ctx, m::BAR_MUSIC_X, cy, d, Glyph::Music, false);
+    ui::circle_button(out, ctx, m::BAR_POWER_X, cy, d, Glyph::Power, false);
+    ui::circle_button(out, ctx, m::BAR_GEAR_X, cy, d, Glyph::Gear, false);
 }
 
+/// Time, battery and free space, all inside the pill as CardsNX draws them.
 fn status_readout(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
-    let cy = ui::TOP_BAR_CY;
-    // Clock.
-    label(out, ctx, &state.status.clock, 990.0, cy + 12.0, 36.0, white(240), Weight::Medium, Align::Right);
-    // Battery: pill outline with a level bar and the percentage.
-    let bx = 1006.0;
+    let cy = m::TOP_MARGIN;
+    label(
+        out,
+        ctx,
+        &state.status.clock,
+        1000.0,
+        cy + 12.0,
+        34.0,
+        white(240),
+        Weight::Medium,
+        Align::Right,
+    );
+    let bx = 1020.0;
     let by = cy - 18.0;
     out.push(Cmd::RoundRect {
         rect: ctx.r(bx, by, 52.0, 36.0),
@@ -130,21 +152,21 @@ fn status_readout(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
         out,
         ctx,
         &format!("{}%", state.status.battery),
-        1074.0,
+        1096.0,
         cy + 12.0,
-        32.0,
+        30.0,
         white(232),
         Weight::Medium,
         Align::Left,
     );
-    // Free storage, right-aligned so it never reaches the icon row.
+    // Free storage, right-aligned inside the pill.
     label(
         out,
         ctx,
         &format_bytes(state.status.free_bytes),
-        1258.0,
+        1288.0,
         cy + 12.0,
-        32.0,
+        30.0,
         white(220),
         Weight::Regular,
         Align::Right,

@@ -65,6 +65,13 @@ pub struct Fonts {
 
 static FONTS: OnceLock<Fonts> = OnceLock::new();
 
+/// Where the shell unpacked the bundled Inter faces (`<filesDir>/fonts`).
+static FONT_DIR: OnceLock<String> = OnceLock::new();
+
+pub fn set_font_dir(dir: &str) {
+    let _ = FONT_DIR.set(dir.to_string());
+}
+
 fn load_first(paths: &[&str]) -> Option<FontVec> {
     for path in paths {
         if let Ok(bytes) = std::fs::read(path) {
@@ -80,11 +87,21 @@ impl Fonts {
     pub fn get() -> &'static Fonts {
         FONTS.get_or_init(|| {
             #[cfg(target_os = "android")]
-            let (regular, medium, bold) = (
-                load_first(ANDROID_REGULAR),
-                load_first(ANDROID_MEDIUM),
-                load_first(ANDROID_BOLD),
-            );
+            let (regular, medium, bold) = {
+                let dir = FONT_DIR.get().cloned().unwrap_or_default();
+                // CardsNX ships Inter 500/600/700; anything else is a fallback.
+                let bundled = |name: &str| -> Option<FontVec> {
+                    if dir.is_empty() {
+                        return None;
+                    }
+                    load_first(&[format!("{dir}/fonts/{name}").as_str()])
+                };
+                (
+                    bundled("Inter-500.ttf").or_else(|| load_first(ANDROID_REGULAR)),
+                    bundled("Inter-600.ttf").or_else(|| load_first(ANDROID_MEDIUM)),
+                    bundled("Inter-700.ttf").or_else(|| load_first(ANDROID_BOLD)),
+                )
+            };
             #[cfg(not(target_os = "android"))]
             let (regular, medium, bold) = (
                 load_first(Weight::Regular.host_paths()),

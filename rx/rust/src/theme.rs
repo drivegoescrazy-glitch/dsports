@@ -96,29 +96,43 @@ impl Metrics {
     }
 }
 
+// The CardsNX source (projects/cards/src/CardsActivity.cpp) lays out on
+// 1280x720. This port works in 1920x1080, so every number below is the source
+// constant multiplied by 1.5 and named the same way.
 pub mod m {
-    // Top bar -----------------------------------------------------------------
-    /// Circle button diameter.
-    pub const BTN_D: f32 = 128.0;
-    pub const BTN_GAP: f32 = 20.0;
-    pub const TOP_MARGIN: f32 = 44.0;
+    // Top bar (kTopY 47, kCircle 77) ------------------------------------------
+    pub const BTN_D: f32 = 115.5;
+    pub const TOP_MARGIN: f32 = 70.5;
+    pub const BTN_GAP: f32 = 12.0;
+    /// kMenuX / kDiscordX / kSortX.
+    pub const BAR_MENU_X: f32 = 201.0;
+    pub const BAR_DISCORD_X: f32 = 328.5;
+    pub const BAR_SORT_X: f32 = 456.0;
+    /// kPillRight: the title pill ends here, everything right of it is a circle.
+    pub const BAR_PILL_LEFT: f32 = 558.0;
+    pub const BAR_PILL_RIGHT: f32 = 1308.0;
+    /// kBellX / kMusicX / kPowerX / kGearX.
+    pub const BAR_BELL_X: f32 = 1362.0;
+    pub const BAR_MUSIC_X: f32 = 1464.0;
+    pub const BAR_POWER_X: f32 = 1591.5;
+    pub const BAR_GEAR_X: f32 = 1719.0;
 
-    // Cards -------------------------------------------------------------------
-    /// Selected card height; width follows the 2:3 box-art ratio.
-    pub const CARD_H: f32 = 540.0;
-    pub const CARD_RATIO: f32 = 2.0 / 3.0;
-    /// Neighbours sit a little lower and smaller than the focused card.
-    pub const CARD_BACK_SCALE: f32 = 0.94;
-    pub const CARD_BACK_DROP: f32 = 22.0;
-    pub const CARD_GAP: f32 = 26.0;
-    pub const CARD_RADIUS: f32 = 26.0;
-    pub const CARD_ROW_TOP: f32 = 158.0;
+    // Cards (kCardW 240, kCardH 340, grow 10x14, mid 291, pitch 250) ----------
+    /// Focused card height; neighbours are kCardH tall.
+    pub const CARD_H: f32 = 531.0;
+    pub const CARD_RATIO: f32 = 240.0 / 354.0;
+    pub const CARD_BACK_SCALE: f32 = 510.0 / 531.0;
+    pub const CARD_BACK_DROP: f32 = 10.5;
+    pub const CARD_GAP: f32 = 15.0;
+    pub const CARD_RADIUS: f32 = 39.0;
+    /// Mid line 291 puts the focused card's top at 114 in source space.
+    pub const CARD_ROW_TOP: f32 = 171.0;
 
-    // Panel -------------------------------------------------------------------
-    pub const PANEL_W: f32 = 1344.0;
-    pub const PANEL_H: f32 = 292.0;
-    pub const PANEL_RADIUS: f32 = 42.0;
-    pub const PANEL_TOP: f32 = 756.0;
+    // Panel (kPanel 186,503 907x207, radius 35) -------------------------------
+    pub const PANEL_W: f32 = 1360.5;
+    pub const PANEL_H: f32 = 310.5;
+    pub const PANEL_RADIUS: f32 = 52.5;
+    pub const PANEL_TOP: f32 = 754.5;
 
     // Dual screen widgets -----------------------------------------------------
     pub const WIDGET_GAP: f32 = 20.0;
