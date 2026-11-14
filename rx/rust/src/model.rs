@@ -103,8 +103,10 @@ pub struct State {
     /// Dual-screen layout: cards on top, widgets + preview below.
     pub dual: bool,
     pub overlay: Overlay,
-    /// Page scroll offset in cards (animated toward `selected`).
+    /// Page scroll offset in cards (animated toward `scroll_target`).
     pub scroll: f32,
+    /// Card position the row is easing toward.
+    pub scroll_target: f32,
     pub hit: Vec<Hit>,
     /// In-flight gesture, in design space.
     pub gesture: Option<Gesture>,
@@ -127,6 +129,7 @@ pub enum Outcome {
     Launch(String),
     PickImage(i32),
     HomeSettings,
+    CheckUpdate,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -161,6 +164,7 @@ impl State {
             dual: false,
             overlay: Overlay::None,
             scroll: 0.0,
+            scroll_target: 0.0,
             hit: Vec::new(),
             gesture: None,
             persist: false,
@@ -177,6 +181,14 @@ impl State {
             self.selected = self.apps.len() - 1;
         }
         self.hit.clear();
+        // Keep the row on whatever card stayed selected after the swap.
+        let pos = self
+            .visible()
+            .iter()
+            .position(|i| *i == self.selected)
+            .unwrap_or(0) as f32;
+        self.scroll = pos;
+        self.scroll_target = pos;
     }
 
     /// Switches page, wrapping around, and focuses its first card.
@@ -189,6 +201,7 @@ impl State {
             self.selected = first;
         }
         self.scroll = 0.0;
+        self.scroll_target = 0.0;
     }
 
     pub fn press(&mut self, x: f32, y: f32) {
@@ -277,6 +290,7 @@ impl State {
             } else {
                 self.selected = index;
                 self.scroll = target as f32;
+                self.scroll_target = target as f32;
                 self.last_tap = None;
             }
         }
@@ -289,13 +303,16 @@ impl State {
             self.persist = true;
             return Outcome::None;
         }
+        if inside(x, y, 380.0, 716.0, 280.0, 72.0) {
+            return Outcome::CheckUpdate;
+        }
         if inside(x, y, 380.0, 580.0, 280.0, 72.0) {
             return Outcome::PickImage(0);
         }
         if inside(x, y, 680.0, 580.0, 280.0, 72.0) {
             return Outcome::PickImage(1);
         }
-        if inside(x, y, 380.0, 820.0, 220.0, 76.0) {
+        if inside(x, y, 380.0, 850.0, 220.0, 76.0) {
             self.overlay = Overlay::None;
         }
         Outcome::None
@@ -337,6 +354,23 @@ impl State {
         let pos = visible.iter().position(|i| *i == self.selected).unwrap_or(0) as i32;
         let next = (pos + delta).clamp(0, visible.len() as i32 - 1);
         self.selected = visible[next as usize];
+        // The row follows the selection; without this the panel changed game
+        // while the cards stayed put.
+        self.scroll_target = next as f32;
+    }
+
+    /// Eases the row toward its target. Returns true while it is still moving,
+    /// so the render thread knows to paint another frame.
+    pub fn tick(&mut self, dt_ms: f32) -> bool {
+        let delta = self.scroll_target - self.scroll;
+        if delta.abs() < 0.002 {
+            self.scroll = self.scroll_target;
+            return false;
+        }
+        // Frame-rate independent ease, settling in about 250 ms.
+        let k = 1.0 - (-(dt_ms.max(0.1)) / 55.0).exp();
+        self.scroll += delta * k.clamp(0.0, 1.0);
+        true
     }
 }
 

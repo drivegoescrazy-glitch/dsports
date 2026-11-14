@@ -121,7 +121,7 @@ pub mod m {
     /// Focused card height; neighbours are kCardH tall.
     pub const CARD_H: f32 = 531.0;
     pub const CARD_RATIO: f32 = 240.0 / 354.0;
-    pub const CARD_BACK_SCALE: f32 = 510.0 / 531.0;
+    pub const CARD_BACK_SCALE: f32 = 0.80;
     pub const CARD_BACK_DROP: f32 = 10.5;
     pub const CARD_GAP: f32 = 15.0;
     pub const CARD_RADIUS: f32 = 39.0;

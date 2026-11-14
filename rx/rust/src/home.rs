@@ -12,29 +12,18 @@ pub const CARD_W: f32 = m::CARD_H * m::CARD_RATIO;
 /// Draws the hero backdrop: the focused game's artwork, full bleed, plus a
 /// bottom-up wash so the chrome stays legible.
 pub fn hero(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
-    let full = rect(0.0, 0.0, ctx.w, ctx.h);
-    if let Some(app) = state.selected_app() {
-        let hero_img = if app.hero != ImgId::None { app.hero } else { app.boxart };
-        if hero_img != ImgId::None {
-            out.push(Cmd::Image {
-                rect: full,
-                radius: 0.0,
-                img: hero_img,
-                uv: rect(0.0, 0.0, 1.0, 1.0),
-                alpha: 1.0,
-                tint: Some(Color::from_rgba8(18, 26, 46, 46)),
-            });
-        } else {
-            // Procedural fallback so the screen never looks unfinished.
-            out.push(Cmd::RoundRect {
-                rect: full,
-                radius: 0.0,
-                fill: Some(Fill::Vertical(Gradient {
-                    top: ui::hsv(app.seed as f32, 0.55, 0.38),
-                    bottom: ui::hsv(app.seed as f32 + 40.0, 0.62, 0.12),
-                })),
-                stroke: None,
-            });
+    // The artwork cross-fades as the row moves: the card leaving keeps the back
+    // layer, the one arriving is painted over it with the scroll fraction.
+    let visible = state.visible();
+    if !visible.is_empty() {
+        let focus = state.scroll.clamp(0.0, (visible.len() - 1) as f32);
+        let i0 = focus.floor() as usize;
+        let frac = focus - i0 as f32;
+        hero_layer(out, ctx, &state.apps[visible[i0]], 1.0);
+        if let Some(next) = visible.get(i0 + 1) {
+            if frac > 0.002 {
+                hero_layer(out, ctx, &state.apps[*next], frac);
+            }
         }
     }
     // Legibility wash: dark at the top bar, clear in the middle, darker at the panel.
@@ -56,6 +45,42 @@ pub fn hero(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
         })),
         stroke: None,
     });
+}
+/// One hero image (or its procedural stand-in) at `alpha`.
+fn hero_layer(out: &mut Vec<Cmd>, ctx: &Ctx, app: &crate::model::AppEntry, alpha: f32) {
+    let full = rect(0.0, 0.0, ctx.w, ctx.h);
+    let hero_img = if app.hero != ImgId::None { app.hero } else { app.boxart };
+    if hero_img != ImgId::None {
+        out.push(Cmd::Image {
+            rect: full,
+            radius: 0.0,
+            img: hero_img,
+            uv: rect(0.0, 0.0, 1.0, 1.0),
+            alpha,
+            tint: Some(Color::from_rgba8(18, 26, 46, 46)),
+        });
+    } else if alpha > 0.01 {
+        // Procedural fallback so the screen never looks unfinished.
+        let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
+        out.push(Cmd::RoundRect {
+            rect: full,
+            radius: 0.0,
+            fill: Some(Fill::Vertical(Gradient {
+                top: fade(ui::hsv(app.seed as f32, 0.55, 0.38), a),
+                bottom: fade(ui::hsv(app.seed as f32 + 40.0, 0.62, 0.12), a),
+            })),
+            stroke: None,
+        });
+    }
+}
+
+fn fade(c: Color, a: u8) -> Color {
+    Color::from_rgba8(
+        (c.red() * 255.0).round() as u8,
+        (c.green() * 255.0).round() as u8,
+        (c.blue() * 255.0).round() as u8,
+        a,
+    )
 }
 
 pub fn top_bar(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
@@ -224,13 +249,14 @@ pub fn cards(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State, top: f32, height: f32
         if abs > 3.2 {
             continue;
         }
-        // Focus falls off with distance: the selected card is full size and lifted.
-        let t = (1.0 - abs.min(1.0)) as f32;
+        // Cover-flow growth: a card grows as it approaches the centre, so the
+        // neighbour visibly swells while the row is easing between selections.
+        let t = (1.0 - (abs / 2.0)).clamp(0.0, 1.0);
         let scale = m::CARD_BACK_SCALE + (1.0 - m::CARD_BACK_SCALE) * smooth(t);
         let card_h = h * scale;
         let card_w = w * scale;
         let drop = m::CARD_BACK_DROP * (1.0 - smooth(t));
-        let center_x = cx + dist * (w + m::CARD_GAP) * 0.98;
+        let center_x = cx + dist * (w + m::CARD_GAP);
         let card = rect(
             ctx.x(center_x - card_w * 0.5),
             ctx.y(top + drop + (h - card_h) * 0.0),

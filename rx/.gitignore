@@ -7,3 +7,4 @@ keystore.properties
 signing/
 *.iml
 .local
+keystore.jks

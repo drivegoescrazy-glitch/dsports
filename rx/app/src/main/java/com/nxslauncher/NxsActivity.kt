@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
@@ -15,7 +16,11 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.WindowManager
+import android.widget.Toast
+import androidx.core.content.FileProvider
+import org.json.JSONObject
 import java.io.File
+import java.net.URL
 
 /**
  * Thin platform shell. Everything visual lives in Rust: this activity only owns
@@ -34,6 +39,7 @@ class NxsActivity : Activity(), SurfaceHolder.Callback {
     private external fun nativeBack()
 
     private var pendingPick: Int = 0
+    private var updateThread: Thread? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +57,7 @@ class NxsActivity : Activity(), SurfaceHolder.Callback {
                 View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
 
         installFonts()
+        cleanupUpdates()
 
         view = SurfaceView(this)
         view.holder.addCallback(this)
@@ -145,6 +152,100 @@ class NxsActivity : Activity(), SurfaceHolder.Callback {
         view.requestFocus()
     }
 
+    // ---------------------------------------------------------------- updates
+
+    /**
+     * Updates come from the public dsports repo: a tiny JSON manifest names the
+     * newest version and where its APK lives. The download goes to the app's own
+     * cache and every older APK is removed on the next start, so nothing is left
+     * behind in shared storage — no permissions needed for either half.
+     */
+    @Suppress("unused")
+    fun checkForUpdate() {
+        if (updateThread?.isAlive == true) return
+        val current = versionName()
+        updateThread = Thread {
+            try {
+                val json = URL(UPDATE_MANIFEST).openConnection().run {
+                    connectTimeout = 10_000
+                    readTimeout = 20_000
+                    getInputStream().bufferedReader().use { it.readText() }
+                }
+                val latest = JSONObject(json).optString("version")
+                val url = JSONObject(json).optString("url")
+                if (latest.isEmpty() || url.isEmpty() || compare(latest, current) <= 0) {
+                    say("NXS Launcher is up to date ($current)")
+                    return@Thread
+                }
+                val dir = File(cacheDir, "updates").apply { mkdirs() }
+                val apk = File(dir, "NXSLauncher-$latest.apk")
+                URL(url).openStream().use { input ->
+                    apk.outputStream().use { output -> input.copyTo(output) }
+                }
+                say("Downloaded $latest, opening the installer")
+                runOnUiThread { install(apk) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "update check failed", t)
+                say("Could not check for updates")
+            }
+        }.also { it.start() }
+    }
+
+    private fun install(apk: File) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+            toast("Allow NXS Launcher to install unknown apps, then try again")
+            startActivity(
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            return
+        }
+        val uri = FileProvider.getUriForFile(this, "$packageName.files", apk)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            startActivity(intent)
+        } catch (t: Throwable) {
+            Log.e(TAG, "install failed", t)
+            toast("Could not open the installer")
+        }
+    }
+
+    /** Old downloads are useless once the installer has run; drop them at start. */
+    private fun cleanupUpdates() {
+        val dir = File(cacheDir, "updates")
+        if (!dir.isDirectory) return
+        val keep = "NXSLauncher-${versionName()}.apk"
+        dir.listFiles()?.forEach { file -> if (file.name != keep) file.delete() }
+    }
+
+    private fun versionName(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "0"
+    } catch (t: Throwable) {
+        "0"
+    }
+
+    private fun compare(a: String, b: String): Int {
+        val x = a.split('.').map { it.toIntOrNull() ?: 0 }
+        val y = b.split('.').map { it.toIntOrNull() ?: 0 }
+        for (i in 0 until maxOf(x.size, y.size)) {
+            val d = (x.getOrElse(i) { 0 }) - (y.getOrElse(i) { 0 })
+            if (d != 0) return d
+        }
+        return 0
+    }
+
+    private fun toast(text: String) {
+        runOnUiThread { Toast.makeText(this, text, Toast.LENGTH_LONG).show() }
+    }
+
+    private fun say(text: String) {
+        Log.i(TAG, text)
+        toast(text)
+    }
+
     // --------------------------------------------------- callbacks from Rust
 
     /** Called from Rust when the user asked for a custom image. */
@@ -217,6 +318,10 @@ class NxsActivity : Activity(), SurfaceHolder.Callback {
     companion object {
         private const val TAG = "NXS"
         private const val REQUEST_PICK = 4801
+
+        /** Public manifest written by each release: {"version":..,"url":..}. */
+        private const val UPDATE_MANIFEST =
+            "https://raw.githubusercontent.com/drivegoescrazy-glitch/dsports/main/rx/docs/update.json"
 
         init {
             System.loadLibrary("nxs")

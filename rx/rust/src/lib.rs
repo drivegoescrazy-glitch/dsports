@@ -20,7 +20,7 @@ use scene::{Cmd, Images, Painter};
 use tiny_skia::Pixmap;
 use ui::Ctx;
 
-pub const VERSION: &str = "1.0.4";
+pub const VERSION: &str = "1.0.5";
 
 /// Builds the full command list for the current state and viewport.
 pub fn build_cmds(state: &State, width: u32, height: u32) -> Vec<Cmd> {
@@ -156,7 +156,49 @@ fn settings(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
         );
     }
 
-    let close = ctx.r(380.0, 820.0, 220.0, 76.0);
+    // Updates: one button, a plain label underneath says what it is doing.
+    label(
+        out,
+        ctx,
+        "Updates",
+        380.0,
+        700.0,
+        34.0,
+        white(230),
+        Weight::Regular,
+        Align::Left,
+    );
+    let check = ctx.r(380.0, 716.0, 280.0, 72.0);
+    out.push(Cmd::RoundRect {
+        rect: check,
+        radius: ctx.d(36.0),
+        fill: Some(Fill::Solid(white(30))),
+        stroke: Some((1.4 * ctx.s, white(40))),
+    });
+    label(
+        out,
+        ctx,
+        "Check for updates",
+        (check.left() + check.width() * 0.5 - ctx.ox) / ctx.s,
+        (check.top() + check.height() * 0.5 + ctx.d(9.0) - ctx.oy) / ctx.s,
+        26.0,
+        white(235),
+        Weight::Medium,
+        Align::Center,
+    );
+    label(
+        out,
+        ctx,
+        "Downloads the newest build from GitHub and installs it.",
+        676.0,
+        760.0,
+        24.0,
+        white(150),
+        Weight::Regular,
+        Align::Left,
+    );
+
+    let close = ctx.r(380.0, 850.0, 220.0, 76.0);
     out.push(Cmd::RoundRect {
         rect: close,
         radius: close.height() * 0.5,

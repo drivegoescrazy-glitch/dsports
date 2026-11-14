@@ -18,9 +18,11 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn new(width: f32, height: f32) -> Self {
-        let sx = width / crate::theme::DESIGN_W;
-        let sy = height / crate::theme::DESIGN_H;
-        let s = sx.max(sy);
+        // Fit, never crop: a 19.5:9 phone is wider than the 16:9 design box, and
+        // scaling by the larger factor pushed the top bar and the panel off the
+        // edges. The design box is centred instead and the hero covers the rest.
+        let fit = (width / crate::theme::DESIGN_W).min(height / crate::theme::DESIGN_H);
+        let s = if fit.is_finite() && fit > 0.0 { fit } else { 1.0 };
         Ctx {
             s,
             ox: (width - crate::theme::DESIGN_W * s) * 0.5,

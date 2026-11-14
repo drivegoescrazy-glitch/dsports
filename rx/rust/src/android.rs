@@ -264,6 +264,9 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeTouch(
         Outcome::HomeSettings => {
             let _ = env.call_method(&this, "openHomeSettings", "()V", &[]);
         }
+        Outcome::CheckUpdate => {
+            let _ = env.call_method(&this, "checkForUpdate", "()V", &[]);
+        }
         Outcome::None => {}
     }
 }
@@ -447,6 +450,9 @@ fn render_loop(window: NativeWindow) {
             // several milliseconds per touch event. Rasterising at most 1280 px
             // wide and letting the GPU upscale the texture keeps sliding smooth,
             // and 1280x720 is exactly the resolution CardsNX itself lays out in.
+            if guard.state.tick(12.0) {
+                guard.dirty = true;
+            }
             let w = guard.width;
             let h = guard.height;
             let (rw, rh) = if w > RENDER_MAX_W {
