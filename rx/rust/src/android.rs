@@ -96,14 +96,34 @@ fn prefs_path(dir: &str) -> String {
     format!("{dir}/nxs.prefs")
 }
 
-fn load_dual(dir: &str) -> bool {
-    std::fs::read_to_string(prefs_path(dir))
-        .map(|s| s.contains("dual=1"))
-        .unwrap_or(false)
+fn load_prefs(dir: &str) -> (bool, f32) {
+    let mut dual = false;
+    let mut scroll_speed = 4.0;
+    if let Ok(contents) = std::fs::read_to_string(prefs_path(dir)) {
+        for line in contents.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                match key.trim() {
+                    "dual" => dual = value.trim() == "1",
+                    "scroll_speed" => {
+                        if let Ok(speed) = value.trim().parse::<f32>() {
+                            if speed.is_finite() {
+                                scroll_speed = speed.clamp(1.0, 8.0);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    (dual, scroll_speed)
 }
 
-fn save_dual(dir: &str, dual: bool) {
-    let _ = std::fs::write(prefs_path(dir), if dual { "dual=1\n" } else { "dual=0\n" });
+fn save_prefs(dir: &str, dual: bool, scroll_speed: f32) {
+    let _ = std::fs::write(
+        prefs_path(dir),
+        format!("dual={}\nscroll_speed={:.1}\n", if dual { 1 } else { 0 }, scroll_speed.clamp(1.0, 8.0)),
+    );
 }
 
 // ---------------------------------------------------------------- JNI entry
@@ -158,7 +178,9 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeCreate(
                 e.images = Arc::new(images);
                 e.state.replace_apps(apps);
                 e.state.status = status;
-                e.state.dual = load_dual(&dir) || e.state.dual;
+                let (dual, scroll_speed) = load_prefs(&dir);
+                e.state.dual = dual;
+                e.state.scroll_speed = scroll_speed;
                 e.dirty = true;
                 arc.1.notify_all();
             })
@@ -238,7 +260,7 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeTouch(
     };
 
     let mut outcome = Outcome::None;
-    let mut persist: Option<bool> = None;
+    let mut persist = false;
     {
         let arc = engine();
         let mut e = lock_engine(&arc);
@@ -249,7 +271,7 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeTouch(
                 outcome = e.state.touch_end(dx, dy, action == 3, down_time, event_time);
                 if e.state.persist {
                     e.state.persist = false;
-                    persist = Some(e.state.dual);
+                    persist = true;
                 }
             }
         }
@@ -257,9 +279,13 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeTouch(
         e.version += 1;
         arc.1.notify_all();
     }
-    if let (Some(dual), arc) = (persist, engine()) {
-        let dir = lock_engine(&arc).files_dir.clone();
-        save_dual(&dir, dual);
+    if persist {
+        let arc = engine();
+        let (dir, dual, scroll_speed) = {
+            let e = lock_engine(&arc);
+            (e.files_dir.clone(), e.state.dual, e.state.scroll_speed)
+        };
+        save_prefs(&dir, dual, scroll_speed);
     }
 
     match outcome {
@@ -548,7 +574,7 @@ fn render_loop(window: NativeWindow) {
                 unsafe { drawer.upload(quad.key, &pixmap) };
             }
         }
-        if scene.rim.is_some() && drawer.size(crate::gpu::LayerKey::Rim) != Some((card_w, card_h)) {
+        if !scene.rims.is_empty() && drawer.size(crate::gpu::LayerKey::Rim) != Some((card_w, card_h)) {
             if let Some(pixmap) =
                 crate::gpu::build_layer(&snapshot, crate::gpu::LayerKey::Rim, sw, sh, &images)
             {
@@ -627,7 +653,7 @@ fn render_loop(window: NativeWindow) {
                 alpha: quad.alpha,
             });
         }
-        if let Some(rim) = &scene.rim {
+        for rim in &scene.rims {
             if drawer.has(rim.key) {
                 quads.push(Drawn {
                     key: rim.key,
@@ -770,7 +796,7 @@ impl Drawer {
     /// Marks a card as recently used. The small LRU lets neighbouring cards
     /// stay resident while keeping memory bounded on large app libraries.
     fn touch_card(&mut self, key: crate::gpu::LayerKey) {
-        if !matches!(key, crate::gpu::LayerKey::Card(_)) {
+        if !matches!(key, crate::gpu::LayerKey::Card(_, _)) {
             return;
         }
         if let Some(position) = self.card_lru.iter().position(|cached| *cached == key) {
@@ -786,7 +812,7 @@ impl Drawer {
             .textures
             .keys()
             .copied()
-            .filter(|key| !keep.contains(key) && !matches!(*key, crate::gpu::LayerKey::Card(_)))
+            .filter(|key| !keep.contains(key) && !matches!(*key, crate::gpu::LayerKey::Card(_, _)))
             .collect();
         for key in stale {
             if let Some(tex) = self.textures.remove(&key) {

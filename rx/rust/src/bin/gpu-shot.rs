@@ -75,17 +75,19 @@ fn main() {
             });
         }
     }
-    if let Some(rim) = &scene.rim {
+    if !scene.rims.is_empty() {
         if let Some(pixmap) = gpu::build_layer(&state, LayerKey::Rim, w, h, &images) {
-            let id = layers.push(pixmap);
-            cmds.push(Cmd::Image {
-                rect: rect(ctx.x(rim.left), ctx.y(rim.top), ctx.d(rim.w), ctx.d(rim.h)),
-                radius: 0.0,
-                img: id,
-                uv: rect(0.0, 0.0, 1.0, 1.0),
-                alpha: rim.alpha,
-                tint: None,
-            });
+            for rim in &scene.rims {
+                let id = layers.push(pixmap.clone());
+                cmds.push(Cmd::Image {
+                    rect: rect(ctx.x(rim.left), ctx.y(rim.top), ctx.d(rim.w), ctx.d(rim.h)),
+                    radius: 0.0,
+                    img: id,
+                    uv: rect(0.0, 0.0, 1.0, 1.0),
+                    alpha: rim.alpha,
+                    tint: None,
+                });
+            }
         }
     }
     if let Some(pixmap) = gpu::build_layer(&state, scene.chrome, w, h, &images) {
@@ -108,6 +110,6 @@ fn main() {
         "wrote {out} ({w}x{h}) — {} bg, {} cards, rim {}, chrome",
         scene.bg.len(),
         scene.cards.len(),
-        scene.rim.is_some()
+        !scene.rims.is_empty()
     );
 }

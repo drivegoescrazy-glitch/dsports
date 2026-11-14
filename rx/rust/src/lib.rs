@@ -297,6 +297,12 @@ pub fn chrome_hash(state: &State) -> u64 {
     state.status.battery.hash(&mut hasher);
     state.status.free_bytes.hash(&mut hasher);
     state.apps.len().hash(&mut hasher);
+    // Refresh the selected game's panel art when custom media is replaced.
+    if let Some(app) = state.apps.get(state.selected) {
+        app.boxart.hash(&mut hasher);
+        app.hero.hash(&mut hasher);
+        app.icon.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -367,6 +373,32 @@ pub(crate) fn settings(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
         fill: Some(Fill::Solid(white(250))),
         stroke: None,
     });
+
+    // Scroll speed: a slider from 1x to 8x, with 4x as the default.
+    label(out, ctx, "Scroll speed", 380.0, 440.0, 34.0, white(230), Weight::Regular, Align::Left);
+    label(out, ctx, "Choose 1x–8x. Default: 4x.", 380.0, 476.0, 24.0, white(150), Weight::Regular, Align::Left);
+    let speed_ratio = ((state.scroll_speed.clamp(1.0, 8.0) - 1.0) / 7.0).clamp(0.0, 1.0);
+    let speed_track = ctx.r(830.0, 420.0, 580.0, 16.0);
+    out.push(Cmd::RoundRect {
+        rect: speed_track,
+        radius: ctx.d(8.0),
+        fill: Some(Fill::Solid(white(40))),
+        stroke: None,
+    });
+    out.push(Cmd::RoundRect {
+        rect: ctx.r(830.0, 420.0, 580.0 * speed_ratio, 16.0),
+        radius: ctx.d(8.0),
+        fill: Some(Fill::Solid(tiny_skia::Color::from_rgba8(180, 92, 255, 230))),
+        stroke: None,
+    });
+    out.push(Cmd::Circle {
+        cx: ctx.x(830.0 + 580.0 * speed_ratio),
+        cy: ctx.y(428.0),
+        radius: ctx.d(18.0),
+        fill: Some(Fill::Solid(white(250))),
+        stroke: Some((1.2 * ctx.s, white(90))),
+    });
+    label(out, ctx, &format!("{:.1}x", state.scroll_speed), 1460.0, 440.0, 30.0, white(245), Weight::Medium, Align::Left);
 
     label(
         out,
