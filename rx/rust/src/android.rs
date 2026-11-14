@@ -127,12 +127,20 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeCreate(
                 let Ok(mut env) = vm.attach_current_thread() else {
                     return;
                 };
+                // Discovery runs outside the engine lock: holding it for the
+                // whole scan would block the UI thread on the next touch and trip
+                // an ANR. The lock is taken only to publish the result.
+                let mut images = Images::new();
+                let mut status = crate::model::StatusBar::default();
+                let apps = platform::load_apps(&mut env, activity.as_obj(), &mut images, &dir);
+                platform::load_status(&mut env, activity.as_obj(), &mut status, &dir);
+
                 let arc = engine();
                 let mut e = lock_engine(&arc);
-                let apps = platform::load_apps(&mut env, activity.as_obj(), &mut e.images, &dir);
+                e.images = images;
                 e.state.replace_apps(apps);
+                e.state.status = status;
                 e.state.dual = load_dual(&dir) || e.state.dual;
-                platform::load_status(&mut env, activity.as_obj(), &mut e.state.status, &dir);
                 e.dirty = true;
                 arc.1.notify_all();
             })
