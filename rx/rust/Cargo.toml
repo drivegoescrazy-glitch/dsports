@@ -1,6 +1,6 @@
 [package]
 name = "nxs"
-version = "1.0.9"
+version = "1.0.10"
 edition = "2021"
 description = "NXS Launcher - native Rust port of the CardsNX layout"
 
