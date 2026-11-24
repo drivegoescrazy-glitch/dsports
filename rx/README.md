@@ -66,9 +66,9 @@ PULSE needs a firmware that exposes `PServerBinder` — stock AYN and Retroid
 handhelds do. On other devices the panel explains why it is unavailable and
 disables Apply/Reset; the launcher itself is unaffected.
 
-This build is signed with a new release key. Android will refuse to install it
-over a 1.0.x build, so uninstall the old version first (settings and profiles
-live in the app's private data and are reset by the uninstall).
+This build is signed with the same release key as earlier NXS Launcher builds
+and uses a higher versionCode, so it installs as an update. Settings and
+profiles are kept.
 
 ## Size and speed
 
