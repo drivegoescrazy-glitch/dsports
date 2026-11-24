@@ -313,6 +313,10 @@ pub fn glyph_at(out: &mut Vec<Cmd>, ctx: &Ctx, glyph: Glyph, cx: f32, cy: f32, s
             line(out, cx + s * 0.24, cy - s * 0.04, cx + s * 0.24, cy + s * 0.28);
             line(out, cx - s * 0.32, cy + s * 0.28, cx + s * 0.32, cy + s * 0.28);
         }
+        Glyph::Close => {
+            line(out, cx - s * 0.24, cy - s * 0.24, cx + s * 0.24, cy + s * 0.24);
+            line(out, cx + s * 0.24, cy - s * 0.24, cx - s * 0.24, cy + s * 0.24);
+        }
     }
 }
 
@@ -335,6 +339,7 @@ pub enum Glyph {
     Check,
     Diamond,
     Home,
+    Close,
 }
 
 /// A pill with a label, used for Play / page chips.

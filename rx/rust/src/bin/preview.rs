@@ -59,12 +59,19 @@ fn main() {
     let mut h = 1080u32;
     let mut dual = false;
     let mut settings = false;
+    let mut pulse = false;
+    let mut pulse_bottom = false;
     let mut out = "docs/v102-home.png".to_string();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--dual" => dual = true,
             "--settings" => settings = true,
+            "--pulse" => pulse = true,
+            "--pulse-bottom" => {
+                pulse_bottom = true;
+                dual = true;
+            }
             "--w" => {
                 i += 1;
                 w = args[i].parse().unwrap_or(w);
@@ -89,8 +96,17 @@ fn main() {
 
     let mut state = State::new(apps);
     state.dual = dual;
+    state.displays.count = 2;
+    state.pulse = nxs::pulse::PulseState::demo();
+    state.pulse.open = false;
     if settings {
         state.overlay = Overlay::Settings;
+    }
+    if pulse {
+        state.pulse.open = true;
+    }
+    if pulse_bottom {
+        state.pulse.bottom = true;
     }
     // Start on the second card so the coverflow reads like the reference.
     state.selected = 1;

@@ -1,14 +1,18 @@
 package com.nxslauncher
 
 import android.app.Activity
+import android.app.ActivityOptions
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.hardware.display.DisplayManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
+import android.view.Display
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
@@ -260,18 +264,70 @@ class NxsActivity : Activity(), SurfaceHolder.Callback {
         startActivityForResult(intent, REQUEST_PICK)
     }
 
-    /** Called from Rust to launch an app by package name. */
+    /**
+     * Called from Rust to launch an app, optionally on a specific physical
+     * display. `slot` is -1 for Android's default choice, 0 for the primary
+     * display and 1 for the first secondary (public) display.
+     */
     @Suppress("unused")
-    fun launchPackage(pkg: String): Boolean {
+    fun launchPackage(pkg: String, slot: Int): Boolean {
         val intent = packageManager.getLaunchIntentForPackage(pkg) ?: return false
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val target = displayForSlot(slot)
+        val secondaryAllowed = packageManager.hasSystemFeature(
+            PackageManager.FEATURE_ACTIVITIES_ON_SECONDARY_DISPLAYS
+        )
         return try {
-            startActivity(intent)
+            if (slot >= 0 && target != Display.DEFAULT_DISPLAY && secondaryAllowed) {
+                val options = ActivityOptions.makeBasic()
+                options.setLaunchDisplayId(target)
+                startActivity(intent, options.toBundle())
+            } else {
+                startActivity(intent)
+            }
             true
         } catch (t: Throwable) {
-            false
+            // A vendor may expose the second panel privately even though it is
+            // listed. Falling back keeps the game launchable instead of dead.
+            Log.e(TAG, "could not launch $pkg on display $target", t)
+            try {
+                startActivity(intent)
+                true
+            } catch (again: Throwable) {
+                Log.e(TAG, "launch failed", again)
+                false
+            }
         }
     }
+
+    private fun publicDisplays(): List<Display> {
+        val manager = getSystemService(DisplayManager::class.java) ?: return emptyList()
+        return manager.displays
+            .filter { it.displayId == Display.DEFAULT_DISPLAY || (it.flags and Display.FLAG_PRIVATE) == 0 }
+            .sortedBy { it.displayId }
+    }
+
+    private fun displayForSlot(slot: Int): Int {
+        if (slot <= 0) return Display.DEFAULT_DISPLAY
+        return publicDisplays()
+            .filter { it.displayId != Display.DEFAULT_DISPLAY }
+            .getOrNull(slot - 1)
+            ?.displayId ?: Display.DEFAULT_DISPLAY
+    }
+
+    /** Number of launchable screens: the primary plus public secondaries. */
+    @Suppress("unused")
+    fun displayCount(): Int {
+        return 1 + publicDisplays().count { it.displayId != Display.DEFAULT_DISPLAY }
+    }
+
+    /** Called from Rust when the PULSE panel opens or retunes. */
+    @Suppress("unused")
+    fun pulseProbe(): String = Pulse.probe()
+
+    /** Applies a PULSE profile; returns OK or a message for the panel. */
+    @Suppress("unused")
+    fun pulseApply(json: String): String = Pulse.apply(json)
 
     /** Called from Rust to open the system UI where the default home is chosen. */
     @Suppress("unused")

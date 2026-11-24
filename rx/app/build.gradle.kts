@@ -20,8 +20,8 @@ android {
         applicationId = "com.nxslauncher"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "1.0.10"
+        versionCode = 13
+        versionName = "1.1.0"
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
@@ -80,4 +80,5 @@ dependencies {
     // Only for FileProvider: the updater has to hand the downloaded APK to the
     // installer as a content:// URI.
     implementation("androidx.core:core:1.13.1")
+    testImplementation("junit:junit:4.13.2")
 }

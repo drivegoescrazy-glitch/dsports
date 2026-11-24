@@ -103,11 +103,22 @@ impl Fonts {
                 )
             };
             #[cfg(not(target_os = "android"))]
-            let (regular, medium, bold) = (
-                load_first(Weight::Regular.host_paths()),
-                load_first(Weight::Medium.host_paths()),
-                load_first(Weight::Bold.host_paths()),
-            );
+            let (regular, medium, bold) = {
+                // The preview binary can point at the APK's bundled faces, so a
+                // headless host renders exactly what the device will.
+                let dir = std::env::var("NXS_FONT_DIR").unwrap_or_default();
+                let bundled = |name: &str| -> Option<FontVec> {
+                    if dir.is_empty() {
+                        return None;
+                    }
+                    load_first(&[format!("{dir}/{name}").as_str()])
+                };
+                (
+                    bundled("Inter-500.ttf").or_else(|| load_first(Weight::Regular.host_paths())),
+                    bundled("Inter-600.ttf").or_else(|| load_first(Weight::Medium.host_paths())),
+                    bundled("Inter-700.ttf").or_else(|| load_first(Weight::Bold.host_paths())),
+                )
+            };
             Fonts {
                 regular,
                 medium,

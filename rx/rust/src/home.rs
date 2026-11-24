@@ -141,7 +141,8 @@ pub fn top_bar(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State) {
 
     ui::circle_button(out, ctx, m::BAR_BELL_X, cy, d, Glyph::Bell, false);
     ui::circle_button(out, ctx, m::BAR_MUSIC_X, cy, d, Glyph::Music, false);
-    ui::circle_button(out, ctx, m::BAR_POWER_X, cy, d, Glyph::Power, false);
+    // The power button is PULSE: highlighted while the tuner is on screen.
+    ui::circle_button(out, ctx, m::BAR_POWER_X, cy, d, Glyph::Power, state.pulse.visible());
     ui::circle_button(out, ctx, m::BAR_GEAR_X, cy, d, Glyph::Gear, false);
 }
 
@@ -417,6 +418,26 @@ pub fn panel(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State, top: f32) -> Rect {
         top + 189.0,
         26.0,
         Palette::AMBER(),
+        Weight::Medium,
+        Align::Left,
+    );
+
+    // Where this game will open. Per-game, so it lives next to the version chip.
+    let screen_chip = ctx.r(text_left + 190.0, top + 158.0, 232.0, 44.0);
+    out.push(Cmd::RoundRect {
+        rect: screen_chip,
+        radius: screen_chip.height() * 0.5,
+        fill: Some(Fill::Solid(Color::from_rgba8(0xB4, 0x5C, 0xFF, 30))),
+        stroke: Some((1.2 * ctx.s, white(34))),
+    });
+    label(
+        out,
+        ctx,
+        app.screen.label(),
+        text_left + 210.0,
+        top + 187.0,
+        22.0,
+        Palette::ACCENT(),
         Weight::Medium,
         Align::Left,
     );

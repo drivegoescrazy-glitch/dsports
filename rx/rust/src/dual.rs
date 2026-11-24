@@ -12,6 +12,17 @@ const SIDE: f32 = 96.0;
 const WIDTH: f32 = 1920.0 - SIDE * 2.0;
 
 pub fn stack(out: &mut Vec<Cmd>, ctx: &Ctx, state: &State, top: f32, bottom: f32) {
+    // The PULSE compact panel replaces the widget stack while it is enabled.
+    // It has its own full set of controls, so the bottom screen area can tune
+    // the device without leaving HOME.
+    if state.pulse.bottom && !state.pulse.open {
+        let game = state
+            .selected_app()
+            .map(|app| app.label.as_str())
+            .unwrap_or("");
+        crate::pulse::draw_bottom(out, ctx, &state.pulse, state.status.battery, game);
+        return;
+    }
     let gap = 16.0;
     let total = (bottom - top).max(0.0);
     // 1 top : 2 middle : preview, with the preview keeping the most room.

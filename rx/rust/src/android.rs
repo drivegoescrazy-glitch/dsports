@@ -6,7 +6,8 @@
 //! static screen the GPU does nothing and the CPU is idle, which is what keeps
 //! the device cool and the battery flat.
 
-use crate::model::{Outcome, State};
+use crate::model::{LaunchScreen, Outcome, State};
+use std::collections::HashMap;
 use crate::scene::Images;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,18 +97,29 @@ fn prefs_path(dir: &str) -> String {
     format!("{dir}/nxs.prefs")
 }
 
-fn load_prefs(dir: &str) -> (bool, f32) {
-    let mut dual = false;
-    let mut scroll_speed = 4.0;
+#[derive(Clone, Copy)]
+struct Prefs {
+    dual: bool,
+    scroll_speed: f32,
+    swap: bool,
+}
+
+fn load_prefs(dir: &str) -> Prefs {
+    let mut prefs = Prefs {
+        dual: false,
+        scroll_speed: 4.0,
+        swap: false,
+    };
     if let Ok(contents) = std::fs::read_to_string(prefs_path(dir)) {
         for line in contents.lines() {
             if let Some((key, value)) = line.split_once('=') {
                 match key.trim() {
-                    "dual" => dual = value.trim() == "1",
+                    "dual" => prefs.dual = value.trim() == "1",
+                    "swap" => prefs.swap = value.trim() == "1",
                     "scroll_speed" => {
                         if let Ok(speed) = value.trim().parse::<f32>() {
                             if speed.is_finite() {
-                                scroll_speed = speed.clamp(1.0, 8.0);
+                                prefs.scroll_speed = speed.clamp(1.0, 8.0);
                             }
                         }
                     }
@@ -116,14 +128,70 @@ fn load_prefs(dir: &str) -> (bool, f32) {
             }
         }
     }
-    (dual, scroll_speed)
+    prefs
 }
 
-fn save_prefs(dir: &str, dual: bool, scroll_speed: f32) {
+fn save_prefs(dir: &str, prefs: Prefs) {
     let _ = std::fs::write(
         prefs_path(dir),
-        format!("dual={}\nscroll_speed={:.1}\n", if dual { 1 } else { 0 }, scroll_speed.clamp(1.0, 8.0)),
+        format!(
+            "dual={}\nscroll_speed={:.1}\nswap={}\n",
+            if prefs.dual { 1 } else { 0 },
+            prefs.scroll_speed.clamp(1.0, 8.0),
+            if prefs.swap { 1 } else { 0 }
+        ),
     );
+}
+
+fn screens_path(dir: &str) -> String {
+    format!("{dir}/nxs.screens")
+}
+
+fn load_screens(dir: &str) -> HashMap<String, LaunchScreen> {
+    let mut out = HashMap::new();
+    if let Ok(contents) = std::fs::read_to_string(screens_path(dir)) {
+        for line in contents.lines() {
+            if let Some((pkg, value)) = line.split_once('=') {
+                let pkg = pkg.trim();
+                if pkg.is_empty() {
+                    continue;
+                }
+                let screen = LaunchScreen::from_str(value);
+                if screen != LaunchScreen::Auto {
+                    out.insert(pkg.to_string(), screen);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn save_screens(dir: &str, state: &State) {
+    let mut text = String::new();
+    for app in &state.apps {
+        if app.screen != LaunchScreen::Auto {
+            text.push_str(&format!("{}={}\n", app.package, app.screen.as_str()));
+        }
+    }
+    let _ = std::fs::write(screens_path(dir), text);
+}
+
+/// All launcher preferences share one save point: display choice, speed,
+/// per-game launch screens and PULSE profiles.
+fn save_all(dir: &str, state: &State) {
+    if dir.is_empty() {
+        return;
+    }
+    save_prefs(
+        dir,
+        Prefs {
+            dual: state.dual,
+            scroll_speed: state.scroll_speed,
+            swap: state.displays.swap,
+        },
+    );
+    save_screens(dir, state);
+    crate::pulse::save(dir, &state.pulse);
 }
 
 // ---------------------------------------------------------------- JNI entry
@@ -172,17 +240,49 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeCreate(
                 let mut status = crate::model::StatusBar::default();
                 let apps = platform::load_apps(&mut env, activity.as_obj(), &mut images, &dir);
                 platform::load_status(&mut env, activity.as_obj(), &mut status, &dir);
+                let probe = platform::pulse_probe(&mut env, activity.as_obj());
+                let display_count = platform::display_count(&mut env, activity.as_obj()).max(1);
+                let saved_screens = load_screens(&dir);
+                let prefs = load_prefs(&dir);
+                let saved_pulse = crate::pulse::load(&dir);
+                let restore_saved = !saved_pulse.caps.is_empty();
 
                 let arc = engine();
                 let mut e = lock_engine(&arc);
                 e.images = Arc::new(images);
                 e.state.replace_apps(apps);
                 e.state.status = status;
-                let (dual, scroll_speed) = load_prefs(&dir);
-                e.state.dual = dual;
-                e.state.scroll_speed = scroll_speed;
+                e.state.dual = prefs.dual;
+                e.state.scroll_speed = prefs.scroll_speed;
+                e.state.displays.count = display_count as usize;
+                e.state.displays.swap = prefs.swap;
+                e.state.pulse.apply_probe(probe);
+                e.state.pulse.apply_saved(saved_pulse);
+                for app in &mut e.state.apps {
+                    if let Some(screen) = saved_screens.get(&app.package) {
+                        app.screen = *screen;
+                    }
+                }
                 e.dirty = true;
                 arc.1.notify_all();
+                // The kernel forgets our ceilings on reboot and this launcher has
+                // no root boot service, so re-apply the saved global profile at
+                // startup. Without this the panel would show a cap the device is
+                // not actually running.
+                let startup = if restore_saved {
+                    e.state.pulse.plan_json(false)
+                } else {
+                    None
+                };
+                drop(e);
+                if let Some(json) = startup {
+                    let reply = platform::pulse_apply(&mut env, activity.as_obj(), &json);
+                    let mut e = lock_engine(&arc);
+                    e.state.pulse.note_applied(&reply);
+                    e.dirty = true;
+                    e.version += 1;
+                    arc.1.notify_all();
+                }
             })
             .ok();
     }
@@ -281,23 +381,48 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeTouch(
     }
     if persist {
         let arc = engine();
-        let (dir, dual, scroll_speed) = {
+        let (dir, snapshot) = {
             let e = lock_engine(&arc);
-            (e.files_dir.clone(), e.state.dual, e.state.scroll_speed)
+            (e.files_dir.clone(), e.state.clone())
         };
-        save_prefs(&dir, dual, scroll_speed);
+        save_all(&dir, &snapshot);
     }
 
     match outcome {
-        Outcome::Launch(pkg) => {
-            if let Ok(s) = env.new_string(pkg) {
+        Outcome::Launch { package, slot } => {
+            // Apply this game's PULSE profile before the game starts. PServer is
+            // synchronous, so the limits are in place by the first frame.
+            let profile = {
+                let arc = engine();
+                let mut e = lock_engine(&arc);
+                e.state.pulse.game_apply_json(&package)
+            };
+            if let Some(json) = profile {
+                let reply = platform::pulse_apply(&mut env, &this, &json);
+                let arc = engine();
+                let mut e = lock_engine(&arc);
+                e.state.pulse.note_applied(&reply);
+                e.dirty = true;
+                e.version += 1;
+                arc.1.notify_all();
+            }
+            if let Ok(s) = env.new_string(&package) {
                 let _ = env.call_method(
                     &this,
                     "launchPackage",
-                    "(Ljava/lang/String;)Z",
-                    &[JValue::Object(&JObject::from(s))],
+                    "(Ljava/lang/String;I)Z",
+                    &[JValue::Object(&JObject::from(s)), JValue::Int(slot)],
                 );
             }
+        }
+        Outcome::PulseApply(json) => {
+            let reply = platform::pulse_apply(&mut env, &this, &json);
+            let arc = engine();
+            let mut e = lock_engine(&arc);
+            e.state.pulse.note_applied(&reply);
+            e.dirty = true;
+            e.version += 1;
+            arc.1.notify_all();
         }
         Outcome::PickImage(kind) => {
             let _ = env.call_method(&this, "pickImage", "(I)V", &[JValue::Int(kind)]);
@@ -340,16 +465,34 @@ pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeKey(
 #[no_mangle]
 pub extern "system" fn Java_com_nxslauncher_NxsActivity_nativeBack(_env: JNIEnv, _this: JObject) {
     let arc = engine();
+    let mut changed = false;
     {
         let mut e = lock_engine(&arc);
-        if e.state.overlay != crate::model::Overlay::None {
+        if e.state.pulse.open {
+            e.state.pulse.open = false;
+            changed = true;
+        } else if e.state.pulse.bottom {
+            e.state.pulse.bottom = false;
+            changed = true;
+        } else if e.state.overlay != crate::model::Overlay::None {
             e.state.overlay = crate::model::Overlay::None;
         } else if e.state.dual {
             e.state.dual = false;
             e.state.persist = true;
+            changed = true;
         }
         e.dirty = true;
         arc.1.notify_all();
+        if changed {
+            e.state.persist = false;
+        }
+    }
+    if changed {
+        let (dir, snapshot) = {
+            let e = lock_engine(&arc);
+            (e.files_dir.clone(), e.state.clone())
+        };
+        save_all(&dir, &snapshot);
     }
 }
 
@@ -518,10 +661,23 @@ fn render_loop(window: NativeWindow) {
         }
         let (scene, snapshot, images, sw, sh) = {
             let mut guard = lock_engine(&arc);
-            while !guard.dirty && !STOP.load(Ordering::SeqCst) {
+            loop {
+                if STOP.load(Ordering::SeqCst) {
+                    break;
+                }
+                // Live clocks/temps once a second while PULSE is on screen. The
+                // panel is the only view that needs a timer, so an idle launcher
+                // stays completely quiet.
+                if guard.state.pulse.poll_if_due(std::time::Instant::now()) {
+                    guard.dirty = true;
+                    guard.version += 1;
+                }
+                if guard.dirty {
+                    break;
+                }
                 let (next, _) = arc
                     .1
-                    .wait_timeout(guard, Duration::from_millis(500))
+                    .wait_timeout(guard, Duration::from_millis(400))
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 guard = next;
             }
@@ -1114,6 +1270,7 @@ pub mod platform {
                 last_played_min: 0,
                 is_game,
                 is_media: false,
+                screen: LaunchScreen::Auto,
                 boxart: custom_box.unwrap_or(ImgId::None),
                 hero: custom_hero.unwrap_or(ImgId::None),
                 icon,
@@ -1318,6 +1475,72 @@ pub mod platform {
             }
         }
         status.online = true;
+    }
+
+    /// Hardware discovery for PULSE. One call at startup; it is the only place
+    /// that touches the privileged PServer service for reads.
+    pub fn pulse_probe(env: &mut JNIEnv, activity: &JObject) -> crate::pulse::Probe {
+        let text = match env.call_method(activity, "pulseProbe", "()Ljava/lang/String;", &[]) {
+            Ok(value) => match value.l() {
+                Ok(object) => jstr(env, &object),
+                Err(_) => {
+                    clear(env);
+                    String::new()
+                }
+            },
+            Err(_) => {
+                clear(env);
+                String::new()
+            }
+        };
+        clear(env);
+        serde_json::from_str::<crate::pulse::Probe>(&text).unwrap_or_else(|_| crate::pulse::Probe {
+            available: false,
+            error: "PULSE could not read this device's performance data.".into(),
+            ..Default::default()
+        })
+    }
+
+    pub fn display_count(env: &mut JNIEnv, activity: &JObject) -> i32 {
+        match env.call_method(activity, "displayCount", "()I", &[]) {
+            Ok(value) => value.i().unwrap_or(1).max(1),
+            Err(_) => {
+                clear(env);
+                1
+            }
+        }
+    }
+
+    pub fn pulse_apply(env: &mut JNIEnv, activity: &JObject, json: &str) -> String {
+        let Some(arg) = new_jstring(env, json) else {
+            return "ERR: Could not pass the profile to the backend".into();
+        };
+        match env.call_method(
+            activity,
+            "pulseApply",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            &[JValue::Object(&arg)],
+        ) {
+            Ok(value) => match value.l() {
+                Ok(object) => {
+                    let text = jstr(env, &object);
+                    clear(env);
+                    if text.is_empty() {
+                        "ERR: PULSE returned no status".into()
+                    } else {
+                        text
+                    }
+                }
+                Err(_) => {
+                    clear(env);
+                    "ERR: PULSE backend failed".into()
+                }
+            },
+            Err(_) => {
+                clear(env);
+                "ERR: PULSE backend unavailable".into()
+            }
+        }
     }
 
     pub fn write_media(dir: &str, pkg: &str, kind: i32, rgba: &[u8], w: u32, h: u32) {

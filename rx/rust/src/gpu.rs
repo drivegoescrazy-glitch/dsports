@@ -5,7 +5,7 @@
 //! cost of a scroll no longer depends on the screen resolution.
 
 use crate::home;
-use crate::model::{Overlay, State};
+use crate::model::State;
 use crate::scene::{rect, Cmd, Images, ImgId, Painter};
 use crate::theme::{m, white};
 use crate::ui::Ctx;
@@ -141,10 +141,7 @@ pub fn build_layer(state: &State, key: LayerKey, w: u32, h: u32, images: &Images
             let mut pixmap = Pixmap::new(w, h)?;
             pixmap.fill(Color::TRANSPARENT);
             let mut cmds = Vec::with_capacity(256);
-            home::build_chrome(&mut cmds, &ctx, state);
-            if state.overlay == Overlay::Settings {
-                crate::settings(&mut cmds, &ctx, state);
-            }
+            crate::chrome_for(&mut cmds, &ctx, state);
             Painter::new(images).paint(&mut pixmap, &cmds);
             Some(pixmap)
         }

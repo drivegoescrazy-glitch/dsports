@@ -8,3 +8,4 @@ signing/
 *.iml
 .local
 keystore.jks
+/NXSLauncher-*.apk

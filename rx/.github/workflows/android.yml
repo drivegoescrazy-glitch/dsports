@@ -58,14 +58,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/release/app-release.apk NXSLauncher-1.0.2.apk
+          VERSION=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts)
+          APK="NXSLauncher-$VERSION.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$APK"
           if [ "$GITHUB_REF_NAME" = "main" ]; then
-            tag="v1.0.2"
+            tag="launcher-$VERSION"
           else
             tag="$GITHUB_REF_NAME"
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" NXSLauncher-1.0.2.apk --clobber
+            gh release upload "$tag" "$APK" --clobber
           else
             echo "no release for $tag yet, keeping the artifact only"
           fi

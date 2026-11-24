@@ -1,6 +1,7 @@
 //! Launcher state: apps, pages, selection and the persisted preferences.
 //! Platform data (installed apps, battery, clock) arrives through `platform`.
 
+use crate::pulse::{PulseHit, PulseState};
 use crate::scene::ImgId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -8,6 +9,55 @@ pub enum Sort {
     Recent,
     Name,
     Size,
+}
+
+/// Which physical panel a game opens on. `Auto` keeps Android's own choice,
+/// which is what the launcher did before per-game screens existed.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum LaunchScreen {
+    Auto,
+    Top,
+    Bottom,
+}
+
+impl LaunchScreen {
+    pub fn label(self) -> &'static str {
+        match self {
+            LaunchScreen::Auto => "Auto",
+            LaunchScreen::Top => "Top screen",
+            LaunchScreen::Bottom => "Bottom screen",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LaunchScreen::Auto => "auto",
+            LaunchScreen::Top => "top",
+            LaunchScreen::Bottom => "bottom",
+        }
+    }
+
+    pub fn from_str(text: &str) -> LaunchScreen {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "top" => LaunchScreen::Top,
+            "bottom" => LaunchScreen::Bottom,
+            _ => LaunchScreen::Auto,
+        }
+    }
+}
+
+/// The physical display layout reported by Android. `swap` exists because a few
+/// dual-screen handhelds expose the bottom panel as the primary display.
+#[derive(Clone, Copy, Debug)]
+pub struct Displays {
+    pub count: usize,
+    pub swap: bool,
+}
+
+impl Default for Displays {
+    fn default() -> Self {
+        Displays { count: 1, swap: false }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -49,6 +99,8 @@ pub struct AppEntry {
     /// True for games (category GAME, or a known emulator/front-end).
     pub is_game: bool,
     pub is_media: bool,
+    /// Per-game launch display choice.
+    pub screen: LaunchScreen,
     /// Custom box art / hero, when the user picked one.
     pub boxart: ImgId,
     pub hero: ImgId,
@@ -102,8 +154,12 @@ pub struct State {
     pub page: Page,
     pub sort: Sort,
     pub status: StatusBar,
-    /// Dual-screen layout: cards on top, widgets + preview below.
+    /// Dual-screen layout: cards on top, PULSE + widgets below.
     pub dual: bool,
+    /// Detected physical displays and which one the user calls the top panel.
+    pub displays: Displays,
+    /// PULSE underclocker state and detected hardware.
+    pub pulse: PulseState,
     pub overlay: Overlay,
     /// Page scroll offset in cards (animated toward `scroll_target`).
     pub scroll: f32,
@@ -114,7 +170,7 @@ pub struct State {
     pub hit: Vec<Hit>,
     /// In-flight gesture, in design space.
     pub gesture: Option<Gesture>,
-    /// Set when the dual-screen preference needs to be written back.
+    /// Set when any preference (display, speed, launch screens, PULSE) changed.
     pub persist: bool,
     last_tap: Option<(usize, u64)>,
 }
@@ -130,7 +186,10 @@ pub struct Gesture {
 #[derive(Clone, Debug)]
 pub enum Outcome {
     None,
-    Launch(String),
+    /// Launch a package; `slot` is -1 for auto, 0 for primary, 1 for secondary.
+    Launch { package: String, slot: i32 },
+    /// Send a PULSE profile to the PServer backend.
+    PulseApply(String),
     PickImage(i32),
     HomeSettings,
     CheckUpdate,
@@ -166,6 +225,8 @@ impl State {
             sort: Sort::Recent,
             status: StatusBar::default(),
             dual: false,
+            displays: Displays::default(),
+            pulse: PulseState::new(),
             overlay: Overlay::None,
             scroll: 0.0,
             scroll_target: 0.0,
@@ -220,11 +281,17 @@ impl State {
 
     pub fn touch_start(&mut self, x: f32, y: f32, _t: i64) {
         self.press(x, y);
+        if self.pulse.visible() {
+            self.pulse.press(x, y);
+        }
     }
 
     pub fn touch_move(&mut self, x: f32, _y: f32, _t: i64) {
         if let Some(g) = &mut self.gesture {
             g.dx = x - g.x0;
+        }
+        if self.pulse.drag.is_some() {
+            self.pulse.drag_to(x);
         }
     }
 
@@ -232,7 +299,38 @@ impl State {
     pub fn touch_end(&mut self, x: f32, y: f32, cancel: bool, _down: i64, _up: i64) -> Outcome {
         let gesture = self.gesture.take();
         if cancel {
+            self.pulse.drag = None;
             return Outcome::None;
+        }
+        // Slider drags always finish, even if the finger ended outside the
+        // sheet: otherwise a fast pull could leave the new cap unapplied.
+        if self.pulse.drag.is_some() {
+            if let Some(json) = self.pulse.release() {
+                self.persist = true;
+                return Outcome::PulseApply(json);
+            }
+            return Outcome::None;
+        }
+        // The full PULSE panel owns the whole screen while it is open.
+        if self.pulse.open {
+            let game = self.selected_app().map(|a| (a.label.clone(), a.package.clone()));
+            let hit = self.pulse.hit_full(
+                x,
+                y,
+                game.as_ref().map(|(label, pkg)| (label.as_str(), pkg.as_str())),
+            );
+            return self.pulse_outcome(hit);
+        }
+        // In dual-screen mode the compact PULSE panel replaces the widgets in
+        // the bottom screen area; the cards above keep working normally.
+        if self.dual && self.pulse.bottom && y >= 520.0 {
+            let game = self.selected_app().map(|a| (a.label.clone(), a.package.clone()));
+            let hit = self.pulse.hit_bottom(
+                x,
+                y,
+                game.as_ref().map(|(label, pkg)| (label.as_str(), pkg.as_str())),
+            );
+            return self.pulse_outcome(hit);
         }
         if self.overlay == Overlay::Settings {
             return self.settings_hit(x, y);
@@ -246,9 +344,24 @@ impl State {
         }
         // Play pill, inside the CardsNX panel.
         if inside(x, y, 316.0, 950.0, 300.0, 76.0) {
-            if let Some(app) = self.selected_app() {
-                return Outcome::Launch(app.package.clone());
+            if let Some(outcome) = self.launch_outcome() {
+                return outcome;
             }
+        }
+        // Power button: opens the full PULSE panel, or flips the compact one
+        // into the dual-screen bottom area.
+        if (x - crate::theme::m::BAR_POWER_X).powi(2)
+            + (y - crate::theme::m::TOP_MARGIN).powi(2)
+            < (crate::theme::m::BTN_D * 0.5).powi(2)
+        {
+            if self.dual {
+                self.pulse.bottom = !self.pulse.bottom;
+            } else {
+                self.pulse.open = true;
+                self.overlay = Overlay::None;
+            }
+            self.persist = true;
+            return Outcome::None;
         }
         // Settings gear (kGearX 1146 on the 1280 layout).
         if (x - crate::theme::m::BAR_GEAR_X).powi(2) + (y - crate::theme::m::TOP_MARGIN).powi(2)
@@ -286,8 +399,8 @@ impl State {
             if index == self.selected {
                 if let Some((last, _)) = self.last_tap {
                     if last == index {
-                        if let Some(app) = self.selected_app() {
-                            return Outcome::Launch(app.package.clone());
+                        if let Some(outcome) = self.launch_outcome() {
+                            return outcome;
                         }
                     }
                 }
@@ -304,9 +417,33 @@ impl State {
     }
 
     fn settings_hit(&mut self, x: f32, y: f32) -> Outcome {
+        // Per-game launch screen.
+        let screen = if inside(x, y, 356.0, 304.0, 164.0, 64.0) {
+            Some(LaunchScreen::Auto)
+        } else if inside(x, y, 532.0, 304.0, 168.0, 64.0) {
+            Some(LaunchScreen::Top)
+        } else if inside(x, y, 712.0, 304.0, 188.0, 64.0) {
+            Some(LaunchScreen::Bottom)
+        } else {
+            None
+        };
+        if let Some(screen) = screen {
+            if let Some(app) = self.apps.get_mut(self.selected) {
+                app.screen = screen;
+                self.persist = true;
+            }
+            return Outcome::None;
+        }
+        // Which physical panel "top" means on this device.
+        if inside(x, y, 356.0, 388.0, 584.0, 56.0) {
+            self.displays.swap = !self.displays.swap;
+            self.persist = true;
+            return Outcome::None;
+        }
+
         // Horizontal speed slider, snapped to half steps for precise control.
-        if inside(x, y, 790.0, 400.0, 660.0, 60.0) {
-            let ratio = ((x - 830.0) / 580.0).clamp(0.0, 1.0);
+        if inside(x, y, 1000.0, 286.0, 520.0, 60.0) {
+            let ratio = ((x - 1020.0) / 440.0).clamp(0.0, 1.0);
             let next_speed = ((1.0 + ratio * 7.0) * 2.0).round() / 2.0;
             if (next_speed - self.scroll_speed).abs() >= 0.01 {
                 self.scroll_speed = next_speed.clamp(1.0, 8.0);
@@ -314,24 +451,70 @@ impl State {
             }
             return Outcome::None;
         }
-        if inside(x, y, 1440.0, 316.0, 112.0, 60.0) {
+        if inside(x, y, 800.0, 518.0, 140.0, 54.0) {
             self.dual = !self.dual;
+            if !self.dual {
+                self.pulse.bottom = false;
+            }
             self.persist = true;
             return Outcome::None;
         }
-        if inside(x, y, 380.0, 716.0, 280.0, 72.0) {
+        if inside(x, y, 356.0, 724.0, 280.0, 64.0) {
+            self.pulse.open = true;
+            self.pulse.bottom = false;
+            self.overlay = Overlay::None;
+            return Outcome::None;
+        }
+        if inside(x, y, 1020.0, 596.0, 300.0, 64.0) {
             return Outcome::CheckUpdate;
         }
-        if inside(x, y, 380.0, 580.0, 280.0, 72.0) {
+        if inside(x, y, 1020.0, 428.0, 250.0, 64.0) {
             return Outcome::PickImage(0);
         }
-        if inside(x, y, 680.0, 580.0, 280.0, 72.0) {
+        if inside(x, y, 1286.0, 428.0, 250.0, 64.0) {
             return Outcome::PickImage(1);
         }
-        if inside(x, y, 380.0, 850.0, 220.0, 76.0) {
+        if inside(x, y, 356.0, 860.0, 220.0, 76.0) {
             self.overlay = Overlay::None;
         }
         Outcome::None
+    }
+
+    fn pulse_outcome(&mut self, hit: PulseHit) -> Outcome {
+        match hit {
+            PulseHit::None => Outcome::None,
+            PulseHit::Changed => {
+                self.persist = true;
+                Outcome::None
+            }
+            PulseHit::Apply(json) => {
+                self.persist = true;
+                Outcome::PulseApply(json)
+            }
+        }
+    }
+
+    /// Maps a game's stored choice onto a display slot (0 primary, 1 secondary).
+    pub fn screen_slot(&self, screen: LaunchScreen) -> i32 {
+        if screen == LaunchScreen::Auto {
+            return -1;
+        }
+        let top = if self.displays.swap { 1 } else { 0 };
+        let bottom = 1 - top;
+        let wanted = if screen == LaunchScreen::Top { top } else { bottom };
+        if (wanted as usize) < self.displays.count.max(1) {
+            wanted as i32
+        } else {
+            0
+        }
+    }
+
+    fn launch_outcome(&self) -> Option<Outcome> {
+        let app = self.selected_app()?;
+        Some(Outcome::Launch {
+            package: app.package.clone(),
+            slot: self.screen_slot(app.screen),
+        })
     }
 
     /// Indices of the apps on the active page, in display order.
@@ -422,6 +605,7 @@ pub fn demo_apps() -> Vec<AppEntry> {
             last_played_min: *last,
             is_game: *game,
             is_media: !*game && (label.contains("Spotify") || label.contains("Netflix")),
+            screen: LaunchScreen::Auto,
             boxart: ImgId::None,
             hero: ImgId::None,
             icon: ImgId::None,
@@ -432,7 +616,7 @@ pub fn demo_apps() -> Vec<AppEntry> {
 
 #[cfg(test)]
 mod scroll_speed_tests {
-    use super::{demo_apps, State};
+    use super::{demo_apps, LaunchScreen, Overlay, State};
 
     #[test]
     fn default_scroll_speed_is_four_times() {
@@ -451,5 +635,43 @@ mod scroll_speed_tests {
         assert!(normal.tick(16.0));
         assert!(fast.tick(16.0));
         assert!(fast.scroll > normal.scroll);
+    }
+
+    #[test]
+    fn launch_screen_maps_to_displays_and_swap() {
+        let mut state = State::new(demo_apps());
+        state.displays.count = 2;
+        assert_eq!(state.screen_slot(LaunchScreen::Auto), -1);
+        assert_eq!(state.screen_slot(LaunchScreen::Top), 0);
+        assert_eq!(state.screen_slot(LaunchScreen::Bottom), 1);
+        state.displays.swap = true;
+        assert_eq!(state.screen_slot(LaunchScreen::Top), 1);
+        assert_eq!(state.screen_slot(LaunchScreen::Bottom), 0);
+        state.displays.count = 1;
+        assert_eq!(state.screen_slot(LaunchScreen::Bottom), 0);
+    }
+
+    #[test]
+    fn settings_chip_sets_a_per_game_screen() {
+        let mut state = State::new(demo_apps());
+        state.overlay = Overlay::Settings;
+        state.selected = 0;
+        let outcome = state.touch_end(600.0, 330.0, false, 0, 10);
+        assert!(matches!(outcome, super::Outcome::None));
+        assert_eq!(state.apps[0].screen, LaunchScreen::Top);
+        assert!(state.persist);
+        // Another card keeps its own choice.
+        assert_eq!(state.apps[1].screen, LaunchScreen::Auto);
+    }
+
+    #[test]
+    fn power_button_opens_the_bottom_panel_in_dual_mode() {
+        let mut state = State::new(demo_apps());
+        state.dual = true;
+        state.touch_end(crate::theme::m::BAR_POWER_X, crate::theme::m::TOP_MARGIN, false, 0, 10);
+        assert!(state.pulse.bottom);
+        assert!(!state.pulse.open);
+        state.touch_end(crate::theme::m::BAR_POWER_X, crate::theme::m::TOP_MARGIN, false, 0, 10);
+        assert!(!state.pulse.bottom);
     }
 }
